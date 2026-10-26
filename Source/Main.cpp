@@ -36,6 +36,7 @@ public:
         {
             setUsingNativeTitleBar (true);
             setContentOwned (new MainComponent(), true);
+            setResizable (false, false); // fixed layout, no point offering a resize handle
 
             centreWithSize (getWidth(), getHeight());
             setVisible (true);
