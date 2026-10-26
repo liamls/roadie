@@ -23,7 +23,7 @@ Déjà implémentée dans `Source/Theme.h` :
 |---|---|---|
 | `background` | `#16171B` | Fond principal, quasi-noir chaud, jamais noir pur |
 | `surface` | `#1E2026` | Cartes niveau 1 |
-| `surfaceRaised` | `#242730` | Cartes niveau 2 / composants surélevés |
+| `surfaceRaised` | `#272A32` | Cartes niveau 2 / composants surélevés (valeur du mockup) |
 | `surfaceSunken` | `#121318` | Champs creux (afficheurs, barres) |
 | `border` | `#2E313A` | Contours |
 | `text` | `#F5F3EE` | Texte principal, blanc cassé chaud |
@@ -49,7 +49,7 @@ Sémantique (distincte de l'accent de couleur, ne jamais réutiliser pour autre 
 
 ## Typographie
 
-**Pas encore implémenté** — l'appli utilise actuellement la police système par défaut de JUCE. Direction cible (cf. recherche design, cohérente avec la constante « grotesque géométrique arrondie » dominante relevée sur les apps créateur/musique) :
+**Implémenté avec Avenir Next** (police système de macOS, `roadie::fonts` dans `Source/Theme.h`) : même famille que la cible ci-dessous, sans fichier à embarquer ni licence à vérifier. Regular/Medium pour l'interface, Demi Bold pour les noms et boutons, Bold pour les titres et grands chiffres ; chiffres tabulaires simulés par `roadie::fonts::drawTabular` (BPM, CPU, chronos). Hors macOS, repli sur la police par défaut — embarquer Plus Jakarta Sans / Poppins si l'identité exacte compte. Direction cible (cf. recherche design, cohérente avec la constante « grotesque géométrique arrondie » dominante relevée sur les apps créateur/musique) :
 
 - **Interface** (labels, valeurs, listes) : grotesque géométrique arrondie et chaleureuse — type *Inter*, *Plus Jakarta Sans* ou *General Sans*
 - **Titres / wordmark** : display bold légèrement condensée et ronde — type *Poppins* ou *Gilroy*
@@ -60,11 +60,24 @@ Pour embarquer une police custom dans JUCE : convertir en binaire via `juce_add_
 ## Formes & composants
 
 - Rayons de bordure modérés mais généreux : 12-16px sur cartes/boutons — déjà appliqué (`RoadieLookAndFeel`, rayons 8-16px selon le composant)
-- **Potards** : anneau de progression conique dans la couleur du module + pointeur, ombre douce — implémenté dans `RoadieLookAndFeel::drawRotarySlider` (actuellement uniquement en orange/`ampAccent`, à paramétrer par couleur de module si on ajoute des contrôles Looper/Caméra avec potards)
+- **Potards** : anneau de progression conique dans la couleur du module + pointeur, face creusée — `RoadieLookAndFeel::drawRotarySlider`, couleur prise sur le slider (`roadie::ui::Knob` reçoit l'accent de son module)
 - VU-mètres / waveform en dégradé de la couleur du module plutôt qu'en vert/rouge classique de console
 - Icônes au trait, épaisseur moyenne, terminaisons arrondies — registre sobre, pas d'emoji ni d'illustration enfantine
-- Navigation par **pages** (Ampli · Looper · Caméra · Export), chaque page héritant de la couleur de son module pour l'accent (barre active, focus ring) — **pas encore implémenté**, l'UI actuelle empile les cartes verticalement dans une seule fenêtre plutôt que de naviguer entre pages
+- ~~Navigation par pages~~ → **écran unique façon DAW, comme le mockup retenu** : bibliothèque à gauche, pistes Guitare / Ampli / Looper / Caméra au centre, inspecteur en bas. Sélectionner une piste (clic ou touches 1/2/3) affiche ses réglages dans l'inspecteur avec la couleur de son module (barre d'accent de la piste et de l'inspecteur). L'export est une fenêtre modale (bouton Exporter jaune)
 
 ## Mode clair/sombre
 
-Sombre par défaut (confort en conditions de jeu/scène, contraste webcam). Mode clair prévu plus tard (Jalon 6) : mêmes 4 couleurs de module, fond inversé vers un crème chaud plutôt qu'un blanc pur, pour rester dans l'esprit « backstage » et non « bureau ». **Pas implémenté** — `RoadieLookAndFeel` ne gère qu'un thème pour l'instant.
+Sombre par défaut (confort en conditions de jeu/scène, contraste webcam). **Mode clair implémenté** (menu Affichage ou ⇧⌘L, mémorisé) : mêmes 4 couleurs de module, fond crème chaud plutôt que blanc pur, pour rester dans l'esprit « backstage » et non « bureau ». Les jetons neutres de `Source/Theme.h` sont commutés à chaud par `roadie::theme::setAppearance()` :
+
+| Token | Sombre | Clair |
+|---|---|---|
+| `background` | `#16171B` | `#F3EEE5` |
+| `surface` | `#1E2026` | `#FBF8F2` |
+| `surfaceRaised` | `#272A32` | `#FFFDF9` |
+| `surfaceSunken` | `#121318` | `#E9E2D6` |
+| `border` | `#2E313A` | `#DCD3C4` |
+| `text` | `#F5F3EE` | `#1F1C17` |
+| `textMuted` | `#9A978F` | `#6E685E` |
+| `textFaint` | `#6B6962` | `#9C9588` |
+
+La zone d'image du moniteur caméra reste sombre dans les deux thèmes (c'est un « écran »).

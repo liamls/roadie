@@ -9,6 +9,7 @@ void AmpEngine::prepare (double sampleRate, int maxBlockSize)
 {
     currentSampleRate = sampleRate;
     currentMaxBlockSize = maxBlockSize;
+    toneStack.prepare (sampleRate);
 
     {
         const juce::SpinLock::ScopedLockType sl (modelLock);
@@ -29,9 +30,21 @@ bool AmpEngine::loadModel (const juce::File& namFile, juce::String& errorMessage
         auto newModel = nam::get_dsp (std::filesystem::path (namFile.getFullPathName().toStdString()));
         newModel->Reset (currentSampleRate, currentMaxBlockSize);
 
-        const juce::SpinLock::ScopedLockType sl (modelLock);
-        model = std::move (newModel);
+        constexpr double targetLoudnessDb = -18.0;
+        const float compensation = newModel->HasLoudness()
+                                       ? juce::Decibels::decibelsToGain ((float) (targetLoudnessDb - newModel->GetLoudness()))
+                                       : 1.0f;
+
+        std::unique_ptr<nam::DSP> previous;
+        {
+            const juce::SpinLock::ScopedLockType sl (modelLock);
+            previous = std::move (model); // freed below, outside the lock the audio thread polls
+            model = std::move (newModel);
+            loudnessCompensation.store (compensation, std::memory_order_relaxed);
+        }
+
         modelName = namFile.getFileNameWithoutExtension();
+        modelFile = namFile;
         loaded.store (true, std::memory_order_release);
         return true;
     }
@@ -45,7 +58,7 @@ bool AmpEngine::loadModel (const juce::File& namFile, juce::String& errorMessage
 void AmpEngine::process (float* samples, int numSamples)
 {
     const auto inGain = inputGain.load (std::memory_order_relaxed);
-    const auto outVolume = outputVolume.load (std::memory_order_relaxed);
+    auto outVolume = outputVolume.load (std::memory_order_relaxed);
 
     for (int i = 0; i < numSamples; ++i)
         samples[i] *= inGain;
@@ -75,6 +88,8 @@ void AmpEngine::process (float* samples, int numSamples)
             model->process (in, out, chunk);
         }
 
+        toneStack.process (chunkPtr, chunk);
+
         if (cabActive)
         {
             float* channelPtrs[1] = { chunkPtr };
@@ -86,6 +101,9 @@ void AmpEngine::process (float* samples, int numSamples)
         offset += chunk;
     }
 
+    if (ampActive)
+        outVolume *= loudnessCompensation.load (std::memory_order_relaxed);
+
     float peak = 0.0f;
     for (int i = 0; i < numSamples; ++i)
     {
@@ -95,14 +113,23 @@ void AmpEngine::process (float* samples, int numSamples)
     peakLevel.store (peak, std::memory_order_relaxed);
 }
 
-void AmpEngine::loadImpulseResponse (const juce::File& irFile)
+void AmpEngine::loadImpulseResponse (const juce::File& newIrFile)
 {
     const juce::SpinLock::ScopedLockType sl (irLock);
-    irConvolution.loadImpulseResponse (irFile,
+    irConvolution.loadImpulseResponse (newIrFile,
                                         juce::dsp::Convolution::Stereo::no,
                                         juce::dsp::Convolution::Trim::yes,
                                         0);
     irConvolution.prepare ({ currentSampleRate, (juce::uint32) currentMaxBlockSize.load(), 1 });
-    irName = irFile.getFileNameWithoutExtension();
+    irName = newIrFile.getFileNameWithoutExtension();
+    irFile = newIrFile;
     irLoadedFlag.store (true, std::memory_order_release);
+}
+
+void AmpEngine::clearImpulseResponse()
+{
+    const juce::SpinLock::ScopedLockType sl (irLock);
+    irLoadedFlag.store (false, std::memory_order_release);
+    irName = {};
+    irFile = juce::File();
 }
