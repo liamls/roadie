@@ -90,15 +90,32 @@ Vérifié : `Session`, `AudioEngine`, `Project`, `Looper`, `VideoPreview` et
      `ClipExporter_mac.mm`, `VideoPreview_mac.mm`, `Tests/TestMovie_mac.mm`) :
      impossibles à compiler/tester sur cette machine Linux. `testClipExport`
      (caméra + export MP4 réels) est `#if JUCE_MAC`, jamais exécuté ici.
-2. **Réécrire `UI/Timeline`** :
-   - en-têtes de piste (M/S, volume, vumètre, survol, sélection) ;
-   - règle (locate, création et déplacement du cycle, ligne fantôme au survol) ;
-   - vue d'arrangement (régions avec forme d'onde, vignettes vidéo, région rouge en cours d'enregistrement d'après l'historique) ;
-   - glisser pour déplacer, avec magnétisme sur la grille (⌘ pour l'ignorer, ⌥ pour dupliquer) ; rogner par les bords (curseur ↔) ;
-   - menu contextuel : couper à la tête de lecture, dupliquer, supprimer, insérer une prise, boucler jusqu'à la fin, exporter cette région ;
-   - zoom (curseur, ⌘← / ⌘→, pincement), barre de défilement, suivi de la tête de lecture ;
-   - moniteur caméra « DIRECT » / « LECTURE » (`session.isPreviewingArrangement()`).
-3. **Raccourcis** dans `MainComponent` : ⌘T couper, ⌫ supprimer, ⌘D dupliquer, ⌘Z / ⇧⌘Z, C cycle, ← / → mesure, B inspecteur, Y bibliothèque. Mettre aussi les menus à jour (Édition).
+2. ~~**Réécrire `UI/Timeline`**~~ **Fait (28/10, sur Mac)** :
+   - en-têtes de piste : icône, nom, sous-titre, M/S, fader de volume
+     (double-clic → 0 dB), mini-vumètre, survol et sélection ;
+   - règle : clic/glisser pour placer la tête de lecture (calée sur le
+     temps, ⌘ pour libre), bande de cycle en haut (glisser pour créer,
+     déplacer, redimensionner ; clic pour activer/désactiver), ligne
+     fantôme au survol ;
+   - régions Guitare avec forme d'onde, région rouge pendant une prise
+     (historique de crêtes) et pendant l'enregistrement d'une boucle ;
+     région de boucle crantée à chaque répétition ; piste Caméra liée aux
+     régions Guitare (vignettes, « audio seul » sinon) ;
+   - glisser pour déplacer (grille ; ⌘ libre ; ⌥ duplique), rogner par les
+     bords (curseur ↔), un seul ⌘Z par geste ;
+   - menu contextuel : couper, dupliquer, supprimer, cycle sur la région,
+     exporter la région, insérer une prise, boucler jusqu'à la fin /
+     arrêter la boucle à la tête de lecture, effacer la boucle ;
+   - zoom (curseur en haut à gauche, ⌘← / ⌘→, pincement, ⌘ + molette),
+     défilement horizontal (trackpad, barre), suivi de la tête de lecture ;
+   - moniteur caméra « DIRECT » / « LECTURE ».
+   - Vérifié : build, CTest, snapshots `--snapshot=… --demo` en clair et en
+     sombre (`--demo` crée un projet de démo avec deux prises synthétiques
+     et une boucle, sans filmer).
+   - **Pas encore vérifié à la main** : les gestes souris (déplacer,
+     rogner, dupliquer, menu, cycle dessiné), les vignettes vidéo dans les
+     régions et l'aperçu LECTURE avec une vraie prise filmée.
+3. **Raccourcis** dans `MainComponent` : déjà branchés ⌘T couper, ⌫ supprimer, ⌘D dupliquer, ⌘Z / ⇧⌘Z, C cycle, ← / → mesure, ⌘← / ⌘→ zoom. Reste : B inspecteur, Y bibliothèque, et le menu Édition.
 4. **Séparateurs déplaçables** (bibliothèque | timeline, largeur des en-têtes, hauteur de l'inspecteur), avec curseur double flèche, survol en accent et tailles sauvegardées dans les réglages.
 5. **Échelle d'interface** : menu Affichage > Taille de l'interface (80–125 %), via `Desktop::setGlobalScaleFactor` ; par défaut 90 % si l'écran fait 1440 pt ou moins.
 6. **TopBar** :

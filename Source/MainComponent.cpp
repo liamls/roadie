@@ -35,6 +35,7 @@ MainComponent::MainComponent()
         if (CameraCapture::isSupported() && ! session.getCamera().isOpen() && ! session.isCameraOpening())
             session.openCamera (session.getSettings().getValue ("cameraDevice"));
     };
+    timeline.onExportRequested = [this] { openExportSheet(); };
     addAndMakeVisible (timeline);
     addAndMakeVisible (inspector);
 
@@ -193,6 +194,14 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         if (code == 'E') { openExportSheet(); return true; }
         if (code == ',') { openAudioSettings(); return true; }
         if (code == 'L' && mods.isShiftDown()) { setLightAppearance (theme::getAppearance() != theme::Appearance::light); return true; }
+
+        // Editing (the timeline's regions).
+        if (code == 'Z' && mods.isShiftDown()) { session.redoEdit(); return true; }
+        if (code == 'Z') { session.undoEdit(); return true; }
+        if (code == 'T') { session.splitAtPlayhead(); return true; }
+        if (code == 'D') { session.duplicateSelection(); return true; }
+        if (code == juce::KeyPress::leftKey)  { timeline.zoomBy (1.0 / 1.5); return true; }
+        if (code == juce::KeyPress::rightKey) { timeline.zoomBy (1.5); return true; }
         return false;
     }
 
@@ -203,6 +212,11 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         || key == juce::KeyPress::homeKey)               { session.returnToStart(); return true; }
     if (key == juce::KeyPress (juce::KeyPress::backspaceKey, juce::ModifierKeys::shiftModifier, 0))
                                                          { session.clearLoop(); return true; }
+    if (key == juce::KeyPress::backspaceKey
+        || key == juce::KeyPress::deleteKey)             { session.deleteSelection(); return true; }
+    if (key == juce::KeyPress::leftKey)                  { session.jumpBars (-1); return true; }
+    if (key == juce::KeyPress::rightKey)                 { session.jumpBars (1); return true; }
+    if (c == 'c')                                        { session.toggleCycle(); return true; }
     if (c == 'r')                                        { session.recordLoop(); return true; }
     if (c == 'o')                                        { session.toggleOverdub(); return true; }
     if (c == 'u')                                        { session.undo(); return true; }

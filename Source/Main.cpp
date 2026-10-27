@@ -3,6 +3,80 @@
 
 #include <iostream>
 
+namespace
+{
+// Verification tool (--demo): a project with two synthetic takes (plucked
+// notes, no video) and a two-bar loop, so snapshots show real regions
+// without recording anything.
+bool writeDemoWav (const juce::File& file, const std::vector<float>& samples, double sampleRate)
+{
+    file.deleteFile();
+    std::unique_ptr<juce::OutputStream> stream = file.createOutputStream();
+    juce::WavAudioFormat wav;
+    auto writer = stream != nullptr ? wav.createWriterFor (stream, juce::AudioFormatWriterOptions{}
+                                                                       .withSampleRate (sampleRate)
+                                                                       .withNumChannels (1)
+                                                                       .withBitsPerSample (24))
+                                    : nullptr;
+    const float* channels[1] = { samples.data() };
+    return writer != nullptr && writer->writeFromFloatArrays (channels, 1, (int) samples.size());
+}
+
+std::vector<float> plucks (double seconds, double sampleRate, double interval, double baseHz, int seed)
+{
+    std::vector<float> out ((size_t) (seconds * sampleRate));
+    juce::Random random (seed);
+    for (double t0 = 0.0; t0 < seconds; t0 += interval)
+    {
+        const double hz = baseHz * std::pow (2.0, random.nextInt (7) / 12.0);
+        const float level = 0.25f + 0.6f * random.nextFloat();
+        for (size_t i = (size_t) (t0 * sampleRate); i < out.size(); ++i)
+        {
+            const double t = (double) i / sampleRate - t0;
+            if (t > interval * 1.8)
+                break;
+            out[i] += level * (float) (std::exp (-t * 3.5) * std::sin (juce::MathConstants<double>::twoPi * hz * t));
+        }
+    }
+    return out;
+}
+
+juce::File createDemoProject (const juce::File& parent)
+{
+    const double sr = 48000.0;
+    auto project = Project::createUntitled();
+    project.name = juce::String::fromUTF8 ("D\xc3\xa9mo");
+    project.folder = parent.getChildFile (project.name + Project::extension);
+    project.folder.deleteRecursively();
+    project.folder.createDirectory();
+    project.bpm = 100.0;
+
+    const double bar = 2.4;
+    for (int n = 1; n <= 2; ++n)
+    {
+        Take take;
+        take.name = Project::getTakeName (n);
+        take.audioFile = project.getTakeFile (n, ".wav");
+        take.audioFile.getParentDirectory().createDirectory();
+        take.durationSeconds = n == 1 ? 4.0 * bar : 3.0 * bar;
+        writeDemoWav (take.audioFile, plucks (take.durationSeconds, sr, n == 1 ? 0.3 : 0.6, n == 1 ? 196.0 : 147.0, n), sr);
+        project.takes.push_back (take);
+    }
+
+    project.arrangement.clips = { { 0, 0.0, 0.0, 4.0 * bar }, { 1, 5.0 * bar, 0.0, 3.0 * bar }, { 0, 8.0 * bar, bar, 2.0 * bar } };
+    project.arrangement.loopAnchor = 2.0 * bar;
+    project.arrangement.loopStart = 2.0 * bar;
+    project.arrangement.loopEnd = 9.0 * bar;
+    project.cycleOn = true;
+    project.cycleStart = 5.0 * bar;
+    project.cycleEnd = 7.0 * bar;
+
+    juce::String error;
+    project.save (plucks (2.0 * bar, sr, 0.15, 330.0, 7), sr, error);
+    return project.folder;
+}
+} // namespace
+
 class RoadieApplication : public juce::JUCEApplication
 {
 public:
@@ -17,7 +91,7 @@ public:
     {
         mainWindow.reset (new MainWindow (getApplicationName()));
 
-        // Verification tool: `Roadie --snapshot=/tmp/ui.png [--track=loop|camera|amp] [--export]`
+        // Verification tool: `Roadie --snapshot=/tmp/ui.png [--track=loop|camera|amp] [--export] [--demo]`
         // renders the window into a PNG after it has settled, then quits —
         // UI checks without screen-recording permissions or a human.
         const auto args = juce::StringArray::fromTokens (commandLine, true);
@@ -135,6 +209,14 @@ public:
         auto* content = dynamic_cast<MainComponent*> (mainWindow->getContentComponent());
         if (content == nullptr)
             return;
+
+        if (args.contains ("--demo"))
+        {
+            auto& session = content->getSession();
+            session.openProject (createDemoProject (juce::File::getSpecialLocation (juce::File::tempDirectory)));
+            session.selectClip (1);
+            session.locate (6.0 * session.getSecondsPerBar());
+        }
 
         for (const auto& arg : args)
         {

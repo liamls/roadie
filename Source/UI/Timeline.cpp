@@ -7,6 +7,10 @@ namespace
 {
 juce::String utf8 (const char* text) { return juce::String::fromUTF8 (text); }
 
+double nowSeconds() { return juce::Time::getMillisecondCounterHiRes() * 0.001; }
+
+constexpr Track allTracks[] = { Track::amp, Track::loop, Track::camera };
+
 juce::Colour accentOf (Track t)
 {
     switch (t)
@@ -22,16 +26,15 @@ icons::Icon iconOf (Track t)
 {
     switch (t)
     {
-        case Track::amp:    return icons::Icon::guitar; // the merged DI + ampli track
+        case Track::amp:    return icons::Icon::guitar;
         case Track::loop:   return icons::Icon::loop;
         case Track::camera: return icons::Icon::camera;
         default:            return icons::Icon::guitar;
     }
 }
 
-// Track::amp is the merged "Guitare" track (raw input, amp processing and
-// its take regions all live here); the amp controls themselves are still
-// labelled "Ampli" in the Inspector.
+// Track::amp is the "Guitare" track (the amp and its take regions); the amp
+// controls themselves are still labelled "Ampli" in the Inspector.
 juce::String nameOf (Track t)
 {
     switch (t)
@@ -56,155 +59,263 @@ juce::String formatBars (double bars)
                                                              : juce::String (rounded, 1).replaceCharacter ('.', ',');
 }
 
-// Peak (linear) → 0..1 display height on a 48 dB scale, so a quiet DI and a
-// loud amp both read clearly.
+// Peak (linear) → 0..1 display height on a 54 dB scale, so quiet and loud
+// takes both read clearly without filling the region.
 float displayHeight (float peak)
 {
-    return juce::jlimit (0.0f, 1.0f, (juce::Decibels::gainToDecibels (peak, -60.0f) + 48.0f) / 48.0f);
+    return juce::jlimit (0.0f, 1.0f, (juce::Decibels::gainToDecibels (peak, -60.0f) + 48.0f) / 54.0f);
 }
 
-// Symmetric waveform envelope; `fadeFrom`..1 is drawn dimmer (older data
-// ahead of the playhead in the sweeping lanes).
-void drawPeaks (juce::Graphics& g, juce::Rectangle<float> area, const std::function<float (int)>& peakAt, int numPeaks,
-                juce::Colour colour, float fadeFrom = 2.0f)
+// Symmetric waveform over `area`, one column every 2 px; `peakAt (x0, x1)`
+// returns the peak of what lies under that pixel span. Only the columns
+// inside `visible` are built.
+void drawWaveform (juce::Graphics& g, juce::Rectangle<float> area, juce::Rectangle<float> visible,
+                   const std::function<float (float, float)>& peakAt, juce::Colour colour)
 {
-    if (numPeaks <= 0 || area.getWidth() < 2.0f)
+    const float from = std::max (area.getX(), visible.getX());
+    const float to = std::min (area.getRight(), visible.getRight());
+    if (to - from < 2.0f || area.getHeight() < 4.0f)
         return;
 
     const float mid = area.getCentreY();
     const float half = area.getHeight() * 0.5f;
-    const int columns = std::max (2, (int) (area.getWidth() / 2.0f));
+    std::vector<float> heights;
+    for (float x = from; x < to; x += 2.0f)
+        heights.push_back (std::max (0.03f, displayHeight (peakAt (x, std::min (to, x + 2.0f)))));
 
-    auto build = [&] (int fromColumn, int toColumn)
+    juce::Path p;
+    p.startNewSubPath (from, mid - heights[0] * half);
+    for (size_t i = 1; i < heights.size(); ++i)
+        p.lineTo (from + 2.0f * (float) i, mid - heights[i] * half);
+    for (size_t i = heights.size(); i-- > 0;)
+        p.lineTo (from + 2.0f * (float) i, mid + heights[i] * half);
+    p.closeSubPath();
+
+    g.setColour (colour.withMultipliedAlpha (0.55f));
+    g.fillPath (p);
+}
+
+constexpr float regionRadius = 5.0f;
+constexpr float titleStrip = 15.0f;
+
+// A region the GarageBand way: tinted body, a coloured title strip with the
+// name, a border that lights up on hover and turns solid when selected.
+void drawRegionFrame (juce::Graphics& g, juce::Rectangle<float> r, juce::Colour colour, const juce::String& name,
+                      bool selected, bool hovered, bool dim)
+{
+    const float alpha = dim ? 0.45f : 1.0f;
+    juce::Path shape;
+    shape.addRoundedRectangle (r, regionRadius);
+
+    g.setColour (colour.withAlpha ((selected ? 0.26f : (hovered ? 0.2f : 0.15f)) * alpha));
+    g.fillPath (shape);
+
+    g.saveState();
+    g.reduceClipRegion (shape);
+    g.setColour (colour.withAlpha ((selected ? 0.9f : (hovered ? 0.45f : 0.32f)) * alpha));
+    g.fillRect (r.withHeight (titleStrip));
+    g.restoreState();
+
+    g.setColour (colour.withAlpha ((selected ? 1.0f : (hovered ? 0.75f : 0.45f)) * alpha));
+    g.drawRoundedRectangle (r.reduced (0.5f), regionRadius, selected ? 1.5f : 1.0f);
+
+    if (name.isNotEmpty() && r.getWidth() > 18.0f)
     {
-        juce::Path p;
-        if (toColumn <= fromColumn)
-            return p;
-
-        std::vector<float> heights;
-        for (int c = fromColumn; c <= toColumn; ++c)
-        {
-            const int index = std::min (numPeaks - 1, c * numPeaks / columns);
-            heights.push_back (std::max (0.04f, displayHeight (peakAt (index))));
-        }
-
-        const float step = area.getWidth() / (float) columns;
-        p.startNewSubPath (area.getX() + fromColumn * step, mid - heights[0] * half);
-        for (size_t i = 1; i < heights.size(); ++i)
-            p.lineTo (area.getX() + (fromColumn + (float) i) * step, mid - heights[i] * half);
-        for (size_t i = heights.size(); i-- > 0;)
-            p.lineTo (area.getX() + (fromColumn + (float) i) * step, mid + heights[i] * half);
-        p.closeSubPath();
-        return p;
-    };
-
-    const int split = juce::jlimit (0, columns, (int) (fadeFrom * (float) columns));
-    auto fresh = build (0, split);
-    auto old = build (split, columns);
-
-    g.setColour (colour.withAlpha (0.3f));
-    g.fillPath (fresh);
-    g.setColour (colour.withAlpha (0.9f));
-    g.strokePath (fresh, juce::PathStrokeType (1.0f));
-
-    g.setColour (colour.withAlpha (0.12f));
-    g.fillPath (old);
-    g.setColour (colour.withAlpha (0.35f));
-    g.strokePath (old, juce::PathStrokeType (1.0f));
+        g.setColour (selected && ! dim ? theme::surfaceSunken : theme::text.withAlpha (0.85f * alpha));
+        g.setFont (fonts::semibold (10.0f));
+        g.drawText (name, r.withHeight (titleStrip).reduced (6.0f, 0.0f), juce::Justification::centredLeft, true);
+    }
 }
 
-void drawChip (juce::Graphics& g, juce::Rectangle<float> region, const juce::String& text, juce::Colour colour)
+// Lit bar on the edge the mouse can trim.
+void drawTrimHandle (juce::Graphics& g, juce::Rectangle<float> r, bool left, juce::Colour colour)
 {
+    const auto bar = left ? r.withWidth (3.0f).reduced (0.0f, 3.0f).translated (1.0f, 0.0f)
+                          : r.withLeft (r.getRight() - 3.0f).reduced (0.0f, 3.0f).translated (-1.0f, 0.0f);
+    g.setColour (colour.brighter (0.3f));
+    g.fillRoundedRectangle (bar, 1.5f);
+}
+
+// Chip on a dark pill, readable over thumbnails and grid alike.
+void drawHint (juce::Graphics& g, juce::Rectangle<float> lane, const juce::String& text, juce::Colour colour)
+{
+    const auto font = fonts::semibold (10.5f);
+    const float w = std::min (lane.getWidth() - 20.0f, juce::GlyphArrangement::getStringWidth (font, text) + 18.0f);
+    auto pill = juce::Rectangle<float> (lane.getX() + 10.0f, lane.getCentreY() - 10.0f, w, 20.0f);
+    g.setColour (theme::surface.withAlpha (0.9f));
+    g.fillRoundedRectangle (pill, 10.0f);
+    g.setColour (colour.withAlpha (0.4f));
+    g.drawRoundedRectangle (pill.reduced (0.5f), 10.0f, 1.0f);
     g.setColour (colour);
-    g.setFont (fonts::display (10.0f));
-    g.drawText (text, region.reduced (9.0f, 5.0f).withHeight (13.0f), juce::Justification::centredLeft, true);
-}
-
-void drawRegion (juce::Graphics& g, juce::Rectangle<float> region, juce::Colour colour, float fillAlpha = 0.12f, float borderAlpha = 0.35f)
-{
-    g.setColour (colour.withAlpha (fillAlpha));
-    g.fillRoundedRectangle (region, theme::radiusSm);
-    g.setColour (colour.withAlpha (borderAlpha));
-    g.drawRoundedRectangle (region.reduced (0.5f), theme::radiusSm, 1.0f);
-}
-
-// Samples in the whole arrangement, i.e. what the ruler and the track lanes
-// span left-to-right. AudioEngine only knows samples/clips/loop, not the
-// Project's notion of "content end" — Session is what converts.
-std::int64_t timelineWindowSamples (Session& session)
-{
-    return (std::int64_t) (session.getContentEnd() * session.getEngine().getSampleRate());
+    g.setFont (font);
+    g.drawText (text, pill.reduced (9.0f, 0.0f), juce::Justification::centredLeft, true);
 }
 } // namespace
 
 //==============================================================================
-class Timeline::TrackRow : public juce::Component
+// Horizontal fader of a track header: linear in dB, double-click → 0 dB.
+class Timeline::MiniFader : public juce::Component,
+                            public juce::SettableTooltipClient
 {
 public:
-    TrackRow (Timeline& o, Session& s, Track t)
+    explicit MiniFader (juce::Colour a) : accent (a)
+    {
+        setMouseCursor (juce::MouseCursor::PointingHandCursor);
+        setRepaintsOnMouseActivity (true);
+    }
+
+    std::function<void (float)> onChange;
+
+    void setValue (float db)
+    {
+        if (! juce::approximatelyEqual (db, value))
+        {
+            value = db;
+            updateTooltip();
+            repaint();
+        }
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto track = getLocalBounds().toFloat().reduced (5.0f, 0.0f);
+        const float y = track.getCentreY();
+        const float x = track.getX() + proportion() * track.getWidth();
+        const bool active = isMouseOverOrDragging();
+
+        g.setColour (theme::border);
+        g.fillRoundedRectangle (track.withHeight (3.0f).withCentre ({ track.getCentreX(), y }), 1.5f);
+        g.setColour (accent.withAlpha (active ? 0.9f : 0.6f));
+        g.fillRoundedRectangle (juce::Rectangle<float> (track.getX(), y - 1.5f, x - track.getX(), 3.0f), 1.5f);
+
+        // 0 dB tick.
+        const float zeroX = track.getX() + toProportion (0.0f) * track.getWidth();
+        g.setColour (theme::textFaint);
+        g.fillRect (juce::Rectangle<float> (zeroX - 0.5f, y + 3.0f, 1.0f, 3.0f));
+
+        const float r = active ? 5.5f : 4.5f;
+        g.setColour (theme::text);
+        g.fillEllipse (x - r, y - r, r * 2.0f, r * 2.0f);
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override { dragTo (e.position.x); }
+    void mouseDrag (const juce::MouseEvent& e) override { dragTo (e.position.x); }
+    void mouseDoubleClick (const juce::MouseEvent&) override { set (0.0f); }
+
+private:
+    static constexpr float minDb = -48.0f, maxDb = 6.0f;
+    static float toProportion (float db) { return juce::jlimit (0.0f, 1.0f, (db - minDb) / (maxDb - minDb)); }
+    float proportion() const { return toProportion (value); }
+
+    void dragTo (float x)
+    {
+        const auto track = getLocalBounds().toFloat().reduced (5.0f, 0.0f);
+        float db = minDb + juce::jlimit (0.0f, 1.0f, (x - track.getX()) / track.getWidth()) * (maxDb - minDb);
+        if (std::abs (db) < 0.8f)
+            db = 0.0f; // a small detent at unity
+        set (std::round (db * 2.0f) * 0.5f);
+    }
+
+    void set (float db)
+    {
+        setValue (db);
+        if (onChange)
+            onChange (db);
+    }
+
+    void updateTooltip()
+    {
+        setTooltip ("Volume : " + (value > 0.0f ? juce::String ("+") : juce::String()) + juce::String (value, 1).replaceCharacter ('.', ',') + " dB");
+    }
+
+    juce::Colour accent;
+    float value = 1.0e9f;
+};
+
+//==============================================================================
+class Timeline::TrackHeader : public juce::Component
+{
+public:
+    TrackHeader (Timeline& o, Session& s, Track t)
         : track (t), owner (o), session (s),
-          muteButton (false, accentOf (t)), soloButton (true, accentOf (t))
+          muteButton (false, accentOf (t)), soloButton (true, accentOf (t)), fader (accentOf (t))
     {
         muteButton.onClick = [this] { session.setMuted (track, muteButton.getToggleState()); };
         soloButton.onClick = [this] { session.setSolo (track, soloButton.getToggleState()); };
         addAndMakeVisible (muteButton);
 
         if (track == Track::camera)
+        {
             muteButton.setTooltip (utf8 ("Couper la cam\xc3\xa9ra pour les prises (audio seul)"));
+        }
         else
+        {
             addAndMakeVisible (soloButton);
+            fader.onChange = [this] (float db) { session.setTrackVolume (track, db); };
+            addAndMakeVisible (fader);
+            addAndMakeVisible (meter);
+        }
 
-        setMouseCursor (juce::MouseCursor::PointingHandCursor);
+        setRepaintsOnMouseActivity (true);
     }
 
     void refreshState()
     {
         muteButton.setToggleState (session.isMuted (track), juce::dontSendNotification);
         soloButton.setToggleState (session.isSolo (track), juce::dontSendNotification);
-        repaint();
+        if (track != Track::camera)
+        {
+            fader.setValue (session.getTrackVolume (track));
+            auto& engine = session.getEngine();
+            meter.setLevel (track == Track::amp ? engine.getGuitarPeak() : engine.getLoopPeak());
+        }
+
+        const auto text = subtitle();
+        if (text != shownSubtitle)
+        {
+            shownSubtitle = text;
+            repaint();
+        }
     }
 
     void resized() override
     {
-        auto head = getLocalBounds().removeFromLeft (headWidth).reduced (10, 0);
-        auto toggles = head.removeFromRight (16);
-        const int total = track == Track::camera ? 12 : 26;
-        toggles = toggles.withSizeKeepingCentre (16, total);
-        muteButton.setBounds (toggles.removeFromTop (12));
-        toggles.removeFromTop (2);
-        soloButton.setBounds (toggles.removeFromTop (12));
+        auto content = getLocalBounds().reduced (12, 0).withTrimmedLeft (3);
+        const bool roomy = getHeight() >= 64 && track != Track::camera;
+        auto top = roomy ? content.removeFromTop (getHeight() / 2 + 6).withTrimmedTop (8) : content;
+
+        auto toggles = top.removeFromRight (track == Track::camera ? 18 : 38).withSizeKeepingCentre (track == Track::camera ? 18 : 38, 16);
+        muteButton.setBounds (toggles.removeFromLeft (18));
+        toggles.removeFromLeft (2);
+        soloButton.setBounds (toggles.removeFromLeft (18));
+        labels = top.withTrimmedLeft (34).withTrimmedRight (6);
+        iconArea = top.withWidth (26).withSizeKeepingCentre (26, 26);
+
+        fader.setVisible (roomy);
+        meter.setVisible (roomy);
+        if (roomy)
+        {
+            auto bottom = content.withTrimmedBottom (8);
+            fader.setBounds (bottom.removeFromTop (16).withTrimmedLeft (28));
+            meter.setBounds (bottom.removeFromTop (5).withTrimmedLeft (33).withTrimmedRight (5));
+        }
     }
 
-    void mouseDown (const juce::MouseEvent& e) override
+    void mouseDown (const juce::MouseEvent&) override
     {
         owner.setSelectedTrack (track);
         if (owner.onTrackSelected)
             owner.onTrackSelected (track);
-
-        if (track == Track::camera && e.x > headWidth && ! session.getCamera().isOpen() && owner.onCameraClicked)
-            owner.onCameraClicked();
     }
 
     void paint (juce::Graphics& g) override
     {
-        auto bounds = getLocalBounds().toFloat();
-        paintHead (g, bounds.removeFromLeft ((float) headWidth));
-        paintLane (g, bounds);
-
-        g.setColour (theme::border);
-        g.drawHorizontalLine (getHeight() - 1, 0.0f, (float) getWidth());
-    }
-
-    const Track track;
-
-private:
-    void paintHead (juce::Graphics& g, juce::Rectangle<float> area)
-    {
         using namespace theme;
+        auto area = getLocalBounds().toFloat();
         const bool active = owner.getSelectedTrack() == track;
         const auto accent = accentOf (track);
 
-        g.setColour (active ? surfaceRaised : surface);
+        g.setColour (active ? surfaceRaised : (isMouseOver (true) ? surface.interpolatedWith (surfaceRaised, 0.45f) : surface));
         g.fillRect (area);
         if (active)
         {
@@ -212,32 +323,33 @@ private:
             g.fillRect (area.withWidth (3.0f));
         }
         g.setColour (border);
-        g.drawVerticalLine ((int) area.getRight() - 1, area.getY(), area.getBottom());
+        g.drawHorizontalLine (getHeight() - 1, 0.0f, area.getRight());
 
-        auto content = area.reduced (10.0f, 0.0f);
-        content.removeFromRight (16.0f + 6.0f);
+        auto box = iconArea.toFloat();
+        g.setColour (accent.withAlpha (active ? 0.24f : 0.15f));
+        g.fillRoundedRectangle (box, 7.0f);
+        icons::draw (g, iconOf (track), box.reduced (6.0f), accent, 1.9f);
 
-        auto iconBox = content.removeFromLeft (26.0f).withSizeKeepingCentre (26.0f, 26.0f);
-        g.setColour (accent.withAlpha (0.15f));
-        g.fillRoundedRectangle (iconBox, 7.0f);
-        icons::draw (g, iconOf (track), iconBox.reduced (6.0f), accent, 1.9f);
-        content.removeFromLeft (9.0f);
-
-        auto labels = content.withSizeKeepingCentre (content.getWidth(), 32.0f);
+        auto textArea = labels.toFloat().withSizeKeepingCentre ((float) labels.getWidth(), 30.0f);
         g.setColour (session.isMuted (track) ? textMuted : theme::text);
         g.setFont (fonts::semibold (12.5f));
-        g.drawText (nameOf (track), labels.removeFromTop (17.0f), juce::Justification::bottomLeft, true);
+        g.drawText (nameOf (track), textArea.removeFromTop (16.0f), juce::Justification::bottomLeft, true);
         g.setColour (textFaint);
         g.setFont (fonts::medium (10.5f));
-        g.drawText (subtitle(), labels, juce::Justification::topLeft, true);
+        g.drawText (shownSubtitle, textArea, juce::Justification::topLeft, true);
     }
 
+    const Track track;
+
+private:
     juce::String subtitle() const
     {
         const auto& engine = session.getEngine();
         switch (track)
         {
             case Track::amp:
+                if (session.isRecordingTake())
+                    return utf8 ("\xe2\x97\x8f Prise ") + formatDuration (session.getTakeSeconds());
                 if (session.isLoadingCapture())
                     return utf8 ("Chargement\xe2\x80\xa6");
                 return session.getCaptureName().isNotEmpty() ? session.getCaptureName() : utf8 ("Aucune capture");
@@ -251,7 +363,7 @@ private:
                     case Looper::State::Empty:       return "Vide";
                     case Looper::State::Recording:   return utf8 ("Enregistrement\xe2\x80\xa6");
                     case Looper::State::Overdubbing: return utf8 ("Overdub\xe2\x80\xa6");
-                    case Looper::State::Stopped:     return utf8 ("En pause \xc2\xb7 ") + formatBars (bars) + " mes.";
+                    case Looper::State::Stopped:
                     case Looper::State::Playing:
                     default:
                     {
@@ -276,67 +388,713 @@ private:
         }
     }
 
-    void paintGrid (juce::Graphics& g, juce::Rectangle<float> lane)
+    Timeline& owner;
+    Session& session;
+    roadie::ui::MuteSoloButton muteButton, soloButton;
+    MiniFader fader;
+    roadie::ui::Meter meter;
+    juce::Rectangle<int> labels, iconArea;
+    juce::String shownSubtitle;
+};
+
+//==============================================================================
+// Top-left corner, above the headers: − [zoom] +.
+class Timeline::ZoomControl : public juce::Component,
+                              public juce::SettableTooltipClient
+{
+public:
+    explicit ZoomControl (Timeline& o) : owner (o)
     {
-        const auto window = (double) timelineWindowSamples (session);
-        const double perBar = session.getSamplesPerBar();
-        if (window <= 0.0 || perBar <= 0.0)
-            return;
-
-        const double pixelsPerBar = lane.getWidth() * perBar / window;
-        int every = 1;
-        while (pixelsPerBar * every < 18.0)
-            every *= 2;
-
-        g.setColour (theme::border.withAlpha (0.7f));
-        for (int bar = every; bar * perBar < window; bar += every)
-            g.drawVerticalLine ((int) (lane.getX() + bar * pixelsPerBar), lane.getY(), lane.getBottom());
+        setTooltip (utf8 ("Zoom horizontal \xe2\x80\x94 \xe2\x8c\x98\xe2\x86\x90 / \xe2\x8c\x98\xe2\x86\x92, ou pincer le trackpad"));
+        setRepaintsOnMouseActivity (true);
+        setMouseCursor (juce::MouseCursor::PointingHandCursor);
     }
 
-    void paintLane (juce::Graphics& g, juce::Rectangle<float> lane)
+    void paint (juce::Graphics& g) override
     {
-        g.setColour (theme::surfaceSunken);
-        g.fillRect (lane);
-        paintGrid (g, lane);
+        auto area = getLocalBounds().toFloat();
+        const auto minus = area.removeFromLeft (14.0f);
+        const auto plus = area.removeFromRight (14.0f);
+        const auto colour = isMouseOverOrDragging() ? theme::textMuted : theme::textFaint;
+
+        g.setColour (colour);
+        g.fillRect (juce::Rectangle<float> (7.0f, 1.5f).withCentre (minus.getCentre()));
+        g.fillRect (juce::Rectangle<float> (7.0f, 1.5f).withCentre (plus.getCentre()));
+        g.fillRect (juce::Rectangle<float> (1.5f, 7.0f).withCentre (plus.getCentre()));
+
+        track = area.reduced (6.0f, 0.0f);
+        const float y = track.getCentreY();
+        g.setColour (theme::border);
+        g.fillRoundedRectangle (track.withHeight (3.0f).withCentre ({ track.getCentreX(), y }), 1.5f);
+        const float x = track.getX() + proportion() * track.getWidth();
+        g.setColour (colour);
+        g.fillEllipse (x - 4.5f, y - 4.5f, 9.0f, 9.0f);
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        if (e.position.x < 14.0f)
+            owner.zoomBy (1.0 / 1.5);
+        else if (e.position.x > (float) getWidth() - 14.0f)
+            owner.zoomBy (1.5);
+        else
+            dragTo (e.position.x);
+    }
+
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (e.mouseDownPosition.x >= 14.0f && e.mouseDownPosition.x <= (float) getWidth() - 14.0f)
+            dragTo (e.position.x);
+    }
+
+private:
+    static double logMin() { return std::log (minPixelsPerSecond); }
+    static double logMax() { return std::log (maxPixelsPerSecond); }
+    float proportion() const { return (float) ((std::log (owner.pixelsPerSecond) - logMin()) / (logMax() - logMin())); }
+
+    void dragTo (float x)
+    {
+        const double p = juce::jlimit (0.0, 1.0, (double) ((x - track.getX()) / std::max (1.0f, track.getWidth())));
+        owner.zoomBy (std::exp (logMin() + p * (logMax() - logMin())) / owner.pixelsPerSecond);
+    }
+
+    Timeline& owner;
+    juce::Rectangle<float> track;
+};
+
+//==============================================================================
+// Bar ruler: click or drag to move the playhead (snapped to the beat, ⌘ for
+// free), drag in the top band to draw or move the cycle zone, click the zone
+// to toggle it.
+class Timeline::Ruler : public juce::Component
+{
+public:
+    Ruler (Timeline& o, Session& s) : owner (o), session (s) {}
+
+    static constexpr float bandHeight = 11.0f;
+
+    void paint (juce::Graphics& g) override
+    {
+        using namespace theme;
+        auto bounds = getLocalBounds().toFloat();
+        g.setColour (surface);
+        g.fillRect (bounds);
+        g.setColour (border);
+        g.drawHorizontalLine (getHeight() - 1, 0.0f, bounds.getRight());
+
+        // Cycle band.
+        const auto cycle = session.getCycleRange();
+        const bool hoverBand = hover.y >= 0.0f && hover.y < bandHeight + 2.0f;
+        if (cycle.getLength() > 0.01)
+        {
+            const float x0 = owner.timeToX (cycle.getStart()), x1 = owner.timeToX (cycle.getEnd());
+            auto band = juce::Rectangle<float> (x0, 2.0f, x1 - x0, bandHeight);
+            const bool on = session.isCycleOn();
+            g.setColour (exportAccent.withAlpha (on ? (hoverBand ? 1.0f : 0.85f) : (hoverBand ? 0.4f : 0.25f)));
+            g.fillRoundedRectangle (band, 3.0f);
+        }
+        else if (hoverBand)
+        {
+            g.setColour (textFaint.withAlpha (0.6f));
+            g.setFont (fonts::medium (9.5f));
+            g.drawText (utf8 ("Glisse ici pour cr\xc3\xa9" "er une zone de cycle"), juce::Rectangle<float> (hover.x + 8.0f, 0.0f, 220.0f, bandHeight + 4.0f),
+                        juce::Justification::centredLeft, false);
+        }
+
+        // Bars and beats.
+        const double bar = session.getSecondsPerBar();
+        const double beat = session.getSecondsPerBeat();
+        const double pps = owner.pixelsPerSecond;
+        int every = 1;
+        while (bar * pps * every < 34.0)
+            every *= 2;
+        const bool beats = beat * pps >= 9.0;
+
+        const double t0 = owner.xToTime (0.0f), t1 = owner.xToTime (bounds.getWidth());
+        g.setFont (fonts::medium (10.5f));
+        for (int b = std::max (0, (int) std::floor (t0 / bar)); b * bar <= t1; ++b)
+        {
+            const float x = owner.timeToX (b * bar);
+            if (b % every == 0)
+            {
+                g.setColour (border.brighter (0.3f));
+                g.drawVerticalLine ((int) x, bandHeight + 4.0f, bounds.getBottom());
+                g.setColour (textMuted);
+                fonts::drawTabular (g, juce::String (b + 1), { x + 4.0f, bandHeight + 3.0f, 34.0f, bounds.getHeight() - bandHeight - 4.0f },
+                                    juce::Justification::centredLeft);
+            }
+            else
+            {
+                g.setColour (border.brighter (0.2f));
+                g.drawVerticalLine ((int) x, bounds.getBottom() - 7.0f, bounds.getBottom());
+            }
+
+            if (beats)
+            {
+                g.setColour (border);
+                for (int k = 1; k < session.getBeatsPerBar(); ++k)
+                    g.drawVerticalLine ((int) owner.timeToX (b * bar + k * beat), bounds.getBottom() - 4.0f, bounds.getBottom());
+            }
+        }
+    }
+
+    void mouseMove (const juce::MouseEvent& e) override
+    {
+        hover = e.position;
+        owner.setHoverX (e.position.x);
+        updateCursor (e.position);
+        repaint();
+    }
+
+    void mouseExit (const juce::MouseEvent&) override
+    {
+        hover = { -1.0f, -1.0f };
+        owner.setHoverX (-1.0f);
+        repaint();
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        moved = false;
+        downTime = owner.xToTime (e.position.x);
+        origin = session.getCycleRange();
+        mode = Mode::none;
+
+        if (e.position.y < bandHeight + 3.0f)
+        {
+            const bool hasRange = origin.getLength() > 0.05;
+            const float x0 = owner.timeToX (origin.getStart()), x1 = owner.timeToX (origin.getEnd());
+            if (hasRange && std::abs (e.position.x - x0) < 6.0f)      mode = Mode::cycleLeft;
+            else if (hasRange && std::abs (e.position.x - x1) < 6.0f) mode = Mode::cycleRight;
+            else if (hasRange && e.position.x > x0 && e.position.x < x1) mode = Mode::cycleMove;
+            else                                                       mode = Mode::cycleCreate;
+        }
+        else
+        {
+            mode = Mode::scrub;
+            session.locate (owner.snap (downTime, ! e.mods.isCommandDown()));
+        }
+    }
+
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (e.getDistanceFromDragStart() > 2)
+            moved = true;
+        if (! moved)
+            return;
+
+        const bool snapping = ! e.mods.isCommandDown();
+        const double t = owner.xToTime (e.position.x);
+        const double step = owner.getGridStep();
+        const double dt = t - downTime;
+        hover = e.position;
+        owner.setHoverX (e.position.x);
+
+        switch (mode)
+        {
+            case Mode::scrub:
+                session.locate (owner.snap (t, snapping));
+                break;
+            case Mode::cycleCreate:
+            {
+                const double a = owner.snap (downTime, snapping), b = owner.snap (t, snapping);
+                if (std::abs (b - a) > 0.01)
+                    session.setCycleRange (std::min (a, b), std::max (a, b));
+                break;
+            }
+            case Mode::cycleMove:
+            {
+                const double start = std::max (0.0, owner.snap (origin.getStart() + dt, snapping));
+                session.setCycleRange (start, start + origin.getLength());
+                break;
+            }
+            case Mode::cycleLeft:
+                session.setCycleRange (std::min (owner.snap (origin.getStart() + dt, snapping), origin.getEnd() - step), origin.getEnd());
+                break;
+            case Mode::cycleRight:
+                session.setCycleRange (origin.getStart(), std::max (owner.snap (origin.getEnd() + dt, snapping), origin.getStart() + step));
+                break;
+            case Mode::none:
+                break;
+        }
+        repaint();
+    }
+
+    void mouseUp (const juce::MouseEvent&) override
+    {
+        const bool cycleMode = mode != Mode::none && mode != Mode::scrub;
+        if (cycleMode && ! moved && mode == Mode::cycleMove)
+            session.toggleCycle();
+        else if (cycleMode && moved && ! session.isCycleOn() && session.getCycleRange().getLength() > 0.05)
+            session.setCycleOn (true); // drawing a zone turns it on, as in GarageBand
+        mode = Mode::none;
+        repaint();
+    }
+
+private:
+    enum class Mode { none, scrub, cycleCreate, cycleMove, cycleLeft, cycleRight };
+
+    void updateCursor (juce::Point<float> p)
+    {
+        auto cursor = juce::MouseCursor::NormalCursor;
+        if (p.y < bandHeight + 3.0f)
+        {
+            const auto cycle = session.getCycleRange();
+            const float x0 = owner.timeToX (cycle.getStart()), x1 = owner.timeToX (cycle.getEnd());
+            if (cycle.getLength() > 0.05 && (std::abs (p.x - x0) < 6.0f || std::abs (p.x - x1) < 6.0f))
+                cursor = juce::MouseCursor::LeftRightResizeCursor;
+            else if (cycle.getLength() > 0.05 && p.x > x0 && p.x < x1)
+                cursor = juce::MouseCursor::PointingHandCursor;
+            else
+                cursor = juce::MouseCursor::CrosshairCursor;
+        }
+        else
+        {
+            cursor = juce::MouseCursor::PointingHandCursor;
+        }
+        setMouseCursor (cursor);
+    }
+
+    Timeline& owner;
+    Session& session;
+    Mode mode = Mode::none;
+    bool moved = false;
+    double downTime = 0.0;
+    juce::Range<double> origin;
+    juce::Point<float> hover { -1.0f, -1.0f };
+};
+
+//==============================================================================
+// The lanes: grid, regions, and the mouse editing of the arrangement. While
+// a region is dragged, the edited copy is drawn (and the engine keeps
+// playing the original); the edit is applied once, on mouse up, so a whole
+// drag is one ⌘Z.
+class Timeline::ArrangeView : public juce::Component
+{
+public:
+    ArrangeView (Timeline& o, Session& s) : owner (o), session (s) {}
+
+    // Cheap fingerprint of what the lanes show, to skip repaints when idle.
+    std::vector<double> signature()
+    {
+        const auto& a = session.getArrangement();
+        const auto& looper = session.getEngine().getLooper();
+        std::vector<double> sig { (double) a.clips.size(), a.loopAnchor, a.loopStart, a.loopEnd,
+                                  (double) session.getSelection(), (double) session.getSelectedClip(),
+                                  (double) session.getTakes().size(), (double) looper.getRecordedLengthSamples(),
+                                  (double) looper.getLayerCount(), (double) looper.getState(),
+                                  session.isCycleOn() ? 1.0 : 0.0, session.getCycleRange().getStart(), session.getCycleRange().getEnd(),
+                                  session.getCamera().isOpen() ? 1.0 : 0.0 };
+        for (const auto& c : a.clips)
+            sig.insert (sig.end(), { (double) c.take, c.start, c.sourceStart, c.length });
+        for (auto t : allTracks)
+            sig.push_back (session.isMuted (t) ? 1.0 : 0.0);
+        return sig;
+    }
+
+    bool isLive() const
+    {
+        const auto state = session.getEngine().getLooper().getState();
+        return session.isRecordingTake() || state == Looper::State::Recording || state == Looper::State::Overdubbing;
+    }
+
+    bool isDragging() const noexcept { return drag.active; }
+
+    void paint (juce::Graphics& g) override
+    {
+        using namespace theme;
+        const auto bounds = getLocalBounds().toFloat();
+        g.setColour (surfaceSunken);
+        g.fillRect (bounds);
+
+        const auto& arrangement = drag.active && drag.moved ? drag.edited : session.getArrangement();
+
+        for (int i = 0; i < 3; ++i)
+        {
+            const auto lane = laneBounds (allTracks[i]);
+            if (owner.getSelectedTrack() == allTracks[i])
+            {
+                g.setColour (text.withAlpha (0.025f));
+                g.fillRect (lane);
+            }
+        }
+
+        paintGrid (g, bounds);
+
+        if (session.isCycleOn())
+        {
+            const auto cycle = session.getCycleRange();
+            const float x0 = owner.timeToX (cycle.getStart()), x1 = owner.timeToX (cycle.getEnd());
+            g.setColour (exportAccent.withAlpha (0.05f));
+            g.fillRect (juce::Rectangle<float> (x0, 0.0f, x1 - x0, laneBounds (Track::camera).getBottom()));
+        }
+
+        for (int i = 0; i < 3; ++i)
+        {
+            g.setColour (border);
+            g.drawHorizontalLine ((int) laneBounds (allTracks[i]).getBottom() - 1, 0.0f, bounds.getRight());
+        }
+
+        paintGuitar (g, arrangement);
+        paintLoop (g, arrangement);
+        paintCamera (g, arrangement);
+    }
+
+    //==============================================================================
+    void mouseMove (const juce::MouseEvent& e) override
+    {
+        owner.setHoverX (e.position.x);
+        const auto hit = hitTestAt (e.position);
+        if (hit != hover)
+        {
+            hover = hit;
+            repaint();
+        }
+        setMouseCursor (hit.zone == Zone::body || hit.kind == Kind::none ? juce::MouseCursor::NormalCursor
+                                                                          : juce::MouseCursor::LeftRightResizeCursor);
+    }
+
+    void mouseExit (const juce::MouseEvent&) override
+    {
+        owner.setHoverX (-1.0f);
+        if (hover.kind != Kind::none)
+        {
+            hover = {};
+            repaint();
+        }
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        const auto lane = laneAt (e.position.y);
+        const auto hit = hitTestAt (e.position);
+        drag = {};
+
+        if (lane.has_value())
+        {
+            owner.setSelectedTrack (*lane);
+            if (owner.onTrackSelected)
+                owner.onTrackSelected (*lane);
+        }
+
+        if (hit.kind == Kind::clip)
+            session.selectClip (hit.index);
+        else if (hit.kind == Kind::loop)
+            session.selectLoopRegion();
+        else
+            session.clearSelection();
+
+        if (e.mods.isPopupMenu())
+        {
+            showMenu (hit, lane, owner.snap (owner.xToTime (e.position.x), true));
+            return;
+        }
+
+        if (hit.kind == Kind::none)
+        {
+            if (lane == Track::camera && ! session.getCamera().isOpen() && owner.onCameraClicked)
+                owner.onCameraClicked();
+            return;
+        }
+
+        drag.active = true;
+        drag.hit = hit;
+        drag.origin = session.getArrangement();
+        drag.edited = drag.origin;
+        drag.downTime = owner.xToTime (e.position.x);
+        drag.duplicate = hit.kind == Kind::clip && hit.zone == Zone::body && e.mods.isAltDown();
+        drag.loopVisibleEnd = loopDisplayEnd (drag.origin);
+        if (hit.zone == Zone::body)
+            setMouseCursor (juce::MouseCursor::DraggingHandCursor);
+    }
+
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        owner.setHoverX (e.position.x);
+        if (! drag.active)
+            return;
+        if (! drag.moved && e.getDistanceFromDragStart() < 3)
+            return;
+        drag.moved = true;
+
+        const bool snapping = ! e.mods.isCommandDown();
+        const double dt = owner.xToTime (e.position.x) - drag.downTime;
+        const double minimum = 0.05;
+        auto edited = drag.origin;
+
+        if (drag.hit.kind == Kind::clip)
+        {
+            const auto& orig = drag.origin.clips[(size_t) drag.hit.index];
+            auto clip = orig;
+            const double takeLength = session.getTakeLength (orig.take);
+
+            switch (drag.hit.zone)
+            {
+                case Zone::body:
+                    clip.start = std::max (0.0, owner.snap (orig.start + dt, snapping));
+                    break;
+                case Zone::left:
+                {
+                    double start = owner.snap (orig.start + dt, snapping);
+                    start = juce::jlimit (std::max (0.0, orig.start - orig.sourceStart), orig.end() - minimum, start);
+                    clip.sourceStart = orig.sourceStart + (start - orig.start);
+                    clip.length = orig.end() - start;
+                    clip.start = start;
+                    break;
+                }
+                case Zone::right:
+                {
+                    double end = owner.snap (orig.end() + dt, snapping);
+                    const double maxEnd = takeLength > 0.0 ? orig.start + (takeLength - orig.sourceStart) : orig.end();
+                    end = juce::jlimit (orig.start + minimum, std::max (orig.start + minimum, maxEnd), end);
+                    clip.length = end - orig.start;
+                    break;
+                }
+            }
+
+            if (drag.duplicate)
+                edited.clips.push_back (clip);
+            else
+                edited.clips[(size_t) drag.hit.index] = clip;
+        }
+        else if (drag.hit.kind == Kind::loop)
+        {
+            const auto& o = drag.origin;
+            switch (drag.hit.zone)
+            {
+                case Zone::body:
+                {
+                    const double delta = std::max (-o.loopStart, owner.snap (o.loopStart + dt, snapping) - o.loopStart);
+                    edited.loopAnchor = o.loopAnchor + delta;
+                    edited.loopStart = o.loopStart + delta;
+                    if (! o.isLoopOpenEnded())
+                        edited.loopEnd = o.loopEnd + delta;
+                    break;
+                }
+                case Zone::left:
+                {
+                    const double limit = (o.isLoopOpenEnded() ? drag.loopVisibleEnd : o.loopEnd) - minimum;
+                    edited.loopStart = juce::jlimit (0.0, limit, owner.snap (o.loopStart + dt, snapping));
+                    break;
+                }
+                case Zone::right:
+                    edited.loopEnd = std::max (o.loopStart + minimum, owner.snap (drag.loopVisibleEnd + dt, snapping));
+                    break;
+            }
+        }
+
+        drag.edited = edited;
+        repaint();
+    }
+
+    void mouseUp (const juce::MouseEvent&) override
+    {
+        if (drag.active && drag.moved && drag.edited != drag.origin)
+        {
+            const bool clip = drag.hit.kind == Kind::clip;
+            const auto name = drag.duplicate ? utf8 ("Dupliquer la r\xc3\xa9gion")
+                              : drag.hit.zone == Zone::body ? (clip ? utf8 ("D\xc3\xa9placer la r\xc3\xa9gion") : utf8 ("D\xc3\xa9placer la boucle"))
+                                                            : (clip ? utf8 ("Rogner la r\xc3\xa9gion") : utf8 ("Rogner la boucle"));
+            const auto edited = drag.edited;
+            const bool duplicate = drag.duplicate;
+            drag = {};
+            session.applyEdit (edited, name);
+            if (duplicate)
+                session.selectClip ((int) edited.clips.size() - 1);
+        }
+        drag = {};
+        repaint();
+    }
+
+    void mouseDoubleClick (const juce::MouseEvent& e) override
+    {
+        if (hitTestAt (e.position).kind == Kind::none)
+            session.locate (owner.snap (owner.xToTime (e.position.x), ! e.mods.isCommandDown()));
+    }
+
+private:
+    enum class Kind { none, clip, loop };
+    enum class Zone { body, left, right };
+
+    struct Hit
+    {
+        Kind kind = Kind::none;
+        int index = -1;
+        Zone zone = Zone::body;
+        bool operator== (const Hit& o) const { return kind == o.kind && index == o.index && zone == o.zone; }
+        bool operator!= (const Hit& o) const { return ! (*this == o); }
+    };
+
+    juce::Rectangle<float> laneBounds (Track t) const
+    {
+        const int i = t == Track::amp ? 0 : (t == Track::loop ? 1 : 2);
+        const int h = owner.getRowHeight();
+        return { 0.0f, (float) (i * h), (float) getWidth(), (float) h };
+    }
+
+    std::optional<Track> laneAt (float y) const
+    {
+        for (auto t : allTracks)
+            if (laneBounds (t).contains (1.0f, y))
+                return t;
+        return std::nullopt;
+    }
+
+    juce::Rectangle<float> regionBounds (Track t, double start, double end) const
+    {
+        const auto lane = laneBounds (t).reduced (0.0f, 4.0f);
+        const float x0 = owner.timeToX (start), x1 = owner.timeToX (end);
+        return { x0, lane.getY(), std::max (2.0f, x1 - x0), lane.getHeight() };
+    }
+
+    // Right end of the loop region: its end, or the right of the view (plus
+    // a margin) when it repeats until the end.
+    double loopDisplayEnd (const Arrangement& a) const
+    {
+        if (! a.isLoopOpenEnded())
+            return a.loopEnd;
+        return std::max ({ owner.xToTime ((float) getWidth() + 40.0f), session.getContentEnd(), a.loopStart + session.getLoopLengthSeconds() });
+    }
+
+    Hit hitTestAt (juce::Point<float> p) const
+    {
+        const auto lane = laneAt (p.y);
+        if (! lane.has_value())
+            return {};
+
+        auto zoneOf = [p] (juce::Rectangle<float> r, bool rightEdge)
+        {
+            const float edge = std::min (7.0f, r.getWidth() * 0.25f);
+            if (p.x < r.getX() + edge)
+                return Zone::left;
+            if (rightEdge && p.x > r.getRight() - edge)
+                return Zone::right;
+            return Zone::body;
+        };
+
+        const auto& a = session.getArrangement();
+        if (*lane == Track::amp || *lane == Track::camera)
+        {
+            // Topmost first: later regions play (and draw) over earlier ones.
+            for (int i = (int) a.clips.size(); --i >= 0;)
+            {
+                const auto& c = a.clips[(size_t) i];
+                const auto r = regionBounds (*lane, c.start, c.end());
+                if (r.contains (p))
+                    return { Kind::clip, i, zoneOf (r, true) };
+            }
+        }
+        else if (session.hasLoop())
+        {
+            const auto r = regionBounds (Track::loop, a.loopStart, loopDisplayEnd (a));
+            if (r.contains (p))
+                return { Kind::loop, -1, zoneOf (r, ! a.isLoopOpenEnded()) };
+        }
+        return {};
+    }
+
+    //==============================================================================
+    void paintGrid (juce::Graphics& g, juce::Rectangle<float> bounds)
+    {
+        const double bar = session.getSecondsPerBar(), beat = session.getSecondsPerBeat();
+        const double pps = owner.pixelsPerSecond;
+        int every = 1;
+        while (bar * pps * every < 16.0)
+            every *= 2;
+        const bool beats = beat * pps >= 14.0;
+        const float bottom = laneBounds (Track::camera).getBottom();
+
+        const double t0 = owner.xToTime (0.0f), t1 = owner.xToTime (bounds.getWidth());
+        for (int b = std::max (0, (int) std::floor (t0 / bar)); b * bar <= t1; ++b)
+        {
+            if (b % every == 0)
+            {
+                g.setColour (theme::border.withAlpha (0.8f));
+                g.drawVerticalLine ((int) owner.timeToX (b * bar), 0.0f, bottom);
+            }
+            if (beats)
+            {
+                g.setColour (theme::border.withAlpha (0.35f));
+                for (int k = 1; k < session.getBeatsPerBar(); ++k)
+                    g.drawVerticalLine ((int) owner.timeToX (b * bar + k * beat), 0.0f, bottom);
+            }
+        }
+    }
+
+    // Peak of the live peak history (the amped guitar) over [t0, t1).
+    float historyPeak (double t0, double t1) const
+    {
+        auto& engine = session.getEngine();
+        const double perSlot = engine.getHistorySlotSamples() / engine.getSampleRate();
+        const auto s0 = (std::int64_t) std::floor (t0 / perSlot), s1 = std::max (s0 + 1, (std::int64_t) std::ceil (t1 / perSlot));
+        float peak = 0.0f;
+        for (auto s = s0; s < s1; ++s)
+            peak = std::max (peak, engine.getHistoryPeak (s));
+        return peak;
+    }
+
+    void paintRecording (juce::Graphics& g, Track lane, double start, const juce::String& name)
+    {
+        const double now = session.getPlayheadSeconds();
+        auto r = regionBounds (lane, start, std::max (start + 0.05, now));
+        drawRegionFrame (g, r, theme::rec, name, false, false, false);
+        drawWaveform (g, r.withTrimmedTop (titleStrip).reduced (0.0f, 3.0f), getLocalBounds().toFloat(),
+                      [this] (float x0, float x1) { return historyPeak (owner.xToTime (x0), owner.xToTime (x1)); }, theme::rec);
+    }
+
+    void paintGuitar (juce::Graphics& g, const Arrangement& arrangement)
+    {
+        const auto lane = laneBounds (Track::amp);
+        const auto visible = getLocalBounds().toFloat();
+        const bool muted = session.isMuted (Track::amp);
+        const auto& takes = session.getTakes();
 
         g.saveState();
         g.reduceClipRegion (lane.toNearestInt());
 
-        switch (track)
+        for (int i = 0; i < (int) arrangement.clips.size(); ++i)
         {
-            case Track::amp:    paintAmp (g, lane); break;
-            case Track::loop:   paintLoop (g, lane); break;
-            case Track::camera: paintCamera (g, lane); break;
+            const auto& c = arrangement.clips[(size_t) i];
+            auto r = regionBounds (Track::amp, c.start, c.end());
+            if (r.getRight() < 0.0f || r.getX() > visible.getRight())
+                continue;
+
+            const bool isSelected = isClipSelected (i);
+            const bool hovered = hover.kind == Kind::clip && hover.index == i;
+            const auto name = juce::isPositiveAndBelow (c.take, (int) takes.size()) ? takes[(size_t) c.take].name : juce::String ("?");
+            drawRegionFrame (g, r, theme::ampAccent, name, isSelected, hovered, muted);
+
+            const auto wave = r.withTrimmedTop (titleStrip).reduced (1.0f, 3.0f);
+            if (const auto* media = session.getTakeMedia (c.take))
+            {
+                drawWaveform (g, wave, visible, [&] (float x0, float x1)
+                {
+                    const double a = c.sourceStart + (owner.xToTime (x0) - c.start), b = c.sourceStart + (owner.xToTime (x1) - c.start);
+                    const auto p0 = (size_t) std::max (0.0, a * Session::TakeMedia::peaksPerSecond);
+                    const auto p1 = std::min (media->peaks.size(), (size_t) std::max (0.0, std::ceil (b * Session::TakeMedia::peaksPerSecond)));
+                    float peak = 0.0f;
+                    for (auto p = p0; p < std::max (p1, p0 + 1) && p < media->peaks.size(); ++p)
+                        peak = std::max (peak, media->peaks[p]);
+                    return peak;
+                }, isSelected ? theme::ampAccent.brighter (0.2f) : theme::ampAccent.withMultipliedAlpha (muted ? 0.5f : 1.0f));
+            }
+            else
+            {
+                g.setColour (theme::textFaint);
+                g.setFont (fonts::medium (10.0f));
+                g.drawText ("Audio introuvable", wave.reduced (6.0f, 0.0f), juce::Justification::centredLeft, true);
+            }
+
+            if (hovered && hover.zone != Zone::body)
+                drawTrimHandle (g, r, hover.zone == Zone::left, theme::ampAccent);
         }
 
+        if (session.isRecordingTake())
+            paintRecording (g, Track::amp, session.getTakeStartSeconds(), utf8 ("\xe2\x97\x8f Prise ") + formatDuration (session.getTakeSeconds()));
+        else if (arrangement.clips.empty())
+            drawHint (g, lane, utf8 ("Aucune prise \xe2\x80\x94 T pour enregistrer guitare + cam\xc3\xa9ra"), theme::ampAccent);
+
         g.restoreState();
-    }
-
-    // The amp's own peak history (what AudioEngine actually tracks — see
-    // AudioEngine::writeHistory); there's no separate raw-input history, so
-    // this is the one live waveform the Guitare lane can show.
-    void paintSweep (juce::Graphics& g, juce::Rectangle<float> area)
-    {
-        auto& engine = session.getEngine();
-        const auto slots = juce::jlimit<std::int64_t> (0, AudioEngine::historyCapacity,
-                                                         timelineWindowSamples (session) / std::max (1, engine.getHistorySlotSamples()));
-        drawPeaks (g, area.reduced (0.0f, 4.0f),
-                   [&engine] (int i) { return engine.getHistoryPeak (i); },
-                   (int) slots, theme::ampAccent, owner.getPlayheadProportion());
-    }
-
-    void paintAmp (juce::Graphics& g, juce::Rectangle<float> lane)
-    {
-        auto region = lane.reduced (lane.getWidth() * 0.012f, 10.0f);
-        const bool live = ! session.isMuted (Track::amp);
-        drawRegion (g, region, theme::ampAccent, live ? 0.12f : 0.05f, live ? 0.35f : 0.15f);
-
-        auto chipText = session.getCaptureName().isNotEmpty() ? session.getCaptureName() : utf8 ("Signal brut");
-        if (session.getIrName().isNotEmpty())
-            chipText << utf8 (" \xc2\xb7 ") << session.getIrName();
-        drawChip (g, region, chipText, theme::ampAccent);
-
-        paintSweep (g, region.withTrimmedTop (16.0f).reduced (2.0f, 2.0f));
     }
 
     void updateOverview()
@@ -349,7 +1107,7 @@ private:
 
         if (length != overviewLength || layers != overviewLayers || (overdubbing && now - overviewTime > 250.0))
         {
-            overview.resize (400);
+            overview.resize (800);
             looper.getOverview (overview.data(), (int) overview.size());
             overviewLength = length;
             overviewLayers = layers;
@@ -357,167 +1115,301 @@ private:
         }
     }
 
-    void paintLoop (juce::Graphics& g, juce::Rectangle<float> lane)
+    void paintLoop (juce::Graphics& g, const Arrangement& arrangement)
     {
         auto& engine = session.getEngine();
         const auto& looper = engine.getLooper();
         const auto state = looper.getState();
-        const double window = (double) timelineWindowSamples (session);
-        const double length = looper.getRecordedLengthSamples();
-        const auto band = lane.reduced (0.0f, 10.0f);
+        const auto lane = laneBounds (Track::loop);
+
+        g.saveState();
+        g.reduceClipRegion (lane.toNearestInt());
 
         if (state == Looper::State::Recording)
         {
-            auto region = band.withWidth ((float) (lane.getWidth() * length / window)).withTrimmedLeft (4.0f);
-            drawRegion (g, region, theme::rec, 0.14f, 0.5f);
-            drawChip (g, region, utf8 ("\xe2\x97\x8f Enregistrement"), theme::rec);
-            g.saveState();
-            g.reduceClipRegion (region.toNearestInt());
-            paintSweep (g, lane.withTrimmedTop (14.0f).reduced (0.0f, 6.0f));
-            g.restoreState();
-            return;
+            paintRecording (g, Track::loop, (double) engine.getLoopAnchor() / engine.getSampleRate(), utf8 ("\xe2\x97\x8f Boucle"));
         }
-
-        if (length <= 0.0)
+        else if (! session.hasLoop())
         {
-            g.setColour (theme::textFaint);
-            g.setFont (fonts::medium (11.5f));
-            g.drawText (utf8 ("Pas encore de boucle \xe2\x80\x94 R ou \xe2\x9f\xb2 pour enregistrer"), lane.reduced (14.0f, 0.0f),
-                        juce::Justification::centredLeft, true);
-            return;
+            drawHint (g, lane, utf8 ("Pas encore de boucle \xe2\x80\x94 R pour enregistrer"), theme::loopAccent);
         }
-
-        updateOverview();
-
-        const float regionWidth = (float) (lane.getWidth() * length / window);
-        const int repeats = (int) std::ceil (window / length);
-        const bool muted = session.isMuted (Track::loop);
-
-        for (int r = 0; r < repeats; ++r)
+        else
         {
-            auto region = juce::Rectangle<float> (lane.getX() + regionWidth * (float) r, band.getY(), regionWidth, band.getHeight())
-                              .reduced (4.0f, 0.0f);
-            const float alpha = (r == 0 ? 1.0f : 0.72f) * (muted ? 0.4f : 1.0f);
-
-            g.saveState();
-            g.setOpacity (alpha);
-            const auto colour = state == Looper::State::Overdubbing ? theme::loopAccent.brighter (0.15f) : theme::loopAccent;
-            drawRegion (g, region, colour);
+            updateOverview();
+            const double length = session.getLoopLengthSeconds();
+            const double end = loopDisplayEnd (arrangement);
+            const auto r = regionBounds (Track::loop, arrangement.loopStart, end);
+            const bool isSelected = session.getSelection() == Session::Selection::loop;
+            const bool hovered = hover.kind == Kind::loop;
+            const bool muted = session.isMuted (Track::loop);
+            const auto colour = state == Looper::State::Overdubbing ? theme::loopAccent.brighter (0.2f) : theme::loopAccent;
 
             const int layers = looper.getLayerCount();
-            juce::String chip = r == 0 ? "Couche " + juce::String (std::max (1, layers)) : utf8 ("R\xc3\xa9p\xc3\xa9tition");
-            if (state == Looper::State::Overdubbing && r == 0)
-                chip = utf8 ("Overdub \xe2\x80\xa6 couche ") + juce::String (layers);
-            drawChip (g, region, chip, colour);
+            auto name = state == Looper::State::Overdubbing ? utf8 ("Overdub \xe2\x80\xa6 couche ") + juce::String (layers)
+                                                            : "Boucle " + formatBars (length / session.getSecondsPerBar()) + utf8 (" mes. \xc2\xb7 ")
+                                                                  + juce::String (layers) + (layers > 1 ? " couches" : " couche");
+            if (arrangement.isLoopOpenEnded())
+                name << utf8 (" \xc2\xb7 jusqu'\xc3\xa0 la fin");
+            drawRegionFrame (g, r, colour, name, isSelected, hovered, muted);
 
-            drawPeaks (g, region.withTrimmedTop (16.0f).reduced (4.0f, 3.0f),
-                       [this] (int i) { return overview[(size_t) i]; }, (int) overview.size(), colour);
-            g.restoreState();
+            // Notches at each repeat, like a looped region in GarageBand.
+            const auto body = r.withTrimmedTop (titleStrip);
+            if (length > 0.01 && length * owner.pixelsPerSecond > 6.0)
+            {
+                const double first = arrangement.loopAnchor + std::ceil ((arrangement.loopStart - arrangement.loopAnchor) / length + 1.0e-9) * length;
+                g.setColour (colour.withAlpha (0.45f));
+                for (double t = first; t < end; t += length)
+                {
+                    const float x = owner.timeToX (t);
+                    if (x > (float) getWidth())
+                        break;
+                    if (x >= 0.0f)
+                        g.fillRect (juce::Rectangle<float> (x - 0.5f, body.getY(), 1.0f, body.getHeight()));
+                }
+            }
+
+            const int n = (int) overview.size();
+            drawWaveform (g, body.reduced (1.0f, 3.0f), getLocalBounds().toFloat(), [&] (float x0, float x1)
+            {
+                if (length <= 0.0 || n == 0)
+                    return 0.0f;
+                auto phaseIndex = [&] (double t)
+                {
+                    const double phase = std::fmod (std::fmod (t - arrangement.loopAnchor, length) + length, length);
+                    return juce::jlimit (0, n - 1, (int) (phase / length * n));
+                };
+                const int i0 = phaseIndex (owner.xToTime (x0)), i1 = phaseIndex (owner.xToTime (x1));
+                float peak = overview[(size_t) i0];
+                for (int i = i0; i != i1 && i1 > i0; ++i)
+                    peak = std::max (peak, overview[(size_t) i]);
+                return peak;
+            }, colour.withMultipliedAlpha (muted ? 0.5f : 1.0f));
+
+            if (arrangement.isLoopOpenEnded())
+            {
+                // The region bleeds off the right edge: it goes on.
+                const auto fade = juce::Rectangle<float> ((float) getWidth() - 36.0f, r.getY(), 36.0f, r.getHeight());
+                g.setGradientFill (juce::ColourGradient (theme::surfaceSunken.withAlpha (0.0f), fade.getX(), 0.0f,
+                                                         theme::surfaceSunken.withAlpha (0.85f), fade.getRight(), 0.0f, false));
+                g.fillRect (fade);
+            }
+
+            if (hovered && hover.zone != Zone::body)
+                drawTrimHandle (g, r, hover.zone == Zone::left, colour);
         }
+
+        g.restoreState();
     }
 
-    void paintCamera (juce::Graphics& g, juce::Rectangle<float> lane)
+    void paintThumbnails (juce::Graphics& g, juce::Rectangle<float> area, const std::vector<juce::Image>& thumbs,
+                          const std::function<int (double)>& indexAt)
     {
-        auto& camera = session.getCamera();
-        auto region = lane.reduced (lane.getWidth() * 0.012f, 10.0f);
+        if (thumbs.empty() || area.getHeight() < 6.0f)
+            return;
 
-        std::vector<juce::Image> thumbs;
-        juce::String chip;
+        juce::Path clip;
+        clip.addRoundedRectangle (area, 3.0f);
+        g.saveState();
+        g.reduceClipRegion (clip);
 
-        if (session.isRecordingTake() && camera.isRecording())
+        const float frameWidth = std::max (16.0f, area.getHeight() * 16.0f / 9.0f);
+        const float from = std::max (area.getX(), area.getX() + std::floor ((0.0f - area.getX()) / frameWidth) * frameWidth);
+        for (float x = std::max (area.getX(), from); x < std::min (area.getRight(), (float) getWidth()); x += frameWidth)
         {
-            thumbs = camera.getRecordingThumbnails();
-            chip = utf8 ("\xe2\x97\x8f REC ") + formatDuration (session.getTakeSeconds());
-        }
-        else if (session.getSelection() == Session::Selection::clip)
-        {
-            const auto& clips = session.getArrangement().clips;
-            const int clipIndex = session.getSelectedClip();
-            const int takeIndex = juce::isPositiveAndBelow (clipIndex, (int) clips.size()) ? clips[(size_t) clipIndex].take : -1;
-            if (juce::isPositiveAndBelow (takeIndex, (int) session.getTakes().size()))
+            const auto frame = juce::Rectangle<float> (x, area.getY(), frameWidth, area.getHeight());
+            const int index = indexAt (owner.xToTime (frame.getCentreX()));
+            if (index < 0)
             {
-                const auto& take = session.getTakes()[(size_t) takeIndex];
-                thumbs = take.thumbnails;
-                chip = take.name + utf8 (" \xc2\xb7 ") + formatDuration (take.durationSeconds) + (take.hasVideo() ? juce::String() : utf8 (" \xc2\xb7 audio seul"));
-            }
-        }
-
-        const bool open = camera.isOpen();
-        drawRegion (g, region, theme::camAccent, open ? 0.10f : 0.05f, open ? 0.30f : 0.15f);
-
-        auto frames = region.reduced (6.0f);
-        const float frameWidth = std::max (24.0f, frames.getHeight() * 16.0f / 9.0f);
-        const int count = std::max (1, (int) (frames.getWidth() / (frameWidth + 3.0f)));
-        const float w = (frames.getWidth() - 3.0f * (float) (count - 1)) / (float) count;
-
-        for (int i = 0; i < count; ++i)
-        {
-            const auto frame = juce::Rectangle<float> (frames.getX() + (float) i * (w + 3.0f), frames.getY(), w, frames.getHeight());
-            juce::Path clip;
-            clip.addRoundedRectangle (frame, 3.0f);
-
-            if (! thumbs.empty())
-            {
-                const auto& image = thumbs[(size_t) i * thumbs.size() / (size_t) count];
-                g.saveState();
-                g.reduceClipRegion (clip);
-                g.drawImage (image, frame, juce::RectanglePlacement::fillDestination);
-                g.restoreState();
+                g.setColour (juce::Colours::black);
+                g.fillRect (frame);
             }
             else
             {
-                const bool odd = i % 2 == 1;
-                const auto base = theme::surfaceSunken;
-                g.setGradientFill (juce::ColourGradient (base.interpolatedWith (theme::camAccent, odd ? 0.26f : 0.22f), frame.getX(), frame.getY(),
-                                                         base.interpolatedWith (theme::camAccent, odd ? 0.14f : 0.12f), frame.getRight(), frame.getBottom(), false));
-                g.setOpacity (open ? 1.0f : 0.5f);
-                g.fillPath (clip);
-                g.setOpacity (1.0f);
+                g.drawImage (thumbs[(size_t) std::min (index, (int) thumbs.size() - 1)], frame, juce::RectanglePlacement::fillDestination);
             }
+            g.setColour (theme::surfaceSunken.withAlpha (0.6f));
+            g.fillRect (frame.withWidth (1.0f));
+        }
+        g.restoreState();
+    }
+
+    void paintCamera (juce::Graphics& g, const Arrangement& arrangement)
+    {
+        const auto lane = laneBounds (Track::camera);
+        const auto visible = getLocalBounds().toFloat();
+        auto& camera = session.getCamera();
+        const auto& takes = session.getTakes();
+
+        g.saveState();
+        g.reduceClipRegion (lane.toNearestInt());
+
+        bool anyVideo = false;
+        for (int i = 0; i < (int) arrangement.clips.size(); ++i)
+        {
+            const auto& c = arrangement.clips[(size_t) i];
+            if (! juce::isPositiveAndBelow (c.take, (int) takes.size()))
+                continue;
+            auto r = regionBounds (Track::camera, c.start, c.end());
+            if (r.getRight() < 0.0f || r.getX() > visible.getRight())
+                continue;
+
+            const auto& take = takes[(size_t) c.take];
+            const bool video = take.hasVideo() && ! take.thumbnails.empty();
+            anyVideo = anyVideo || video;
+            const bool isSelected = isClipSelected (i);
+            const bool hovered = hover.kind == Kind::clip && hover.index == i;
+            drawRegionFrame (g, r, theme::camAccent, video ? take.name : take.name + utf8 (" \xc2\xb7 audio seul"), isSelected, hovered, ! video);
+
+            if (video)
+            {
+                const double offset = take.getVideoOffsetSeconds();
+                paintThumbnails (g, r.withTrimmedTop (titleStrip).reduced (2.0f, 2.0f), take.thumbnails, [&c, offset] (double t)
+                {
+                    const double movieTime = c.sourceStart + (t - c.start) - offset;
+                    return movieTime < 0.0 ? -1 : (int) movieTime; // one thumbnail per second of movie
+                });
+            }
+
+            if (hovered && hover.zone != Zone::body)
+                drawTrimHandle (g, r, hover.zone == Zone::left, theme::camAccent);
         }
 
-        if (chip.isEmpty())
-            chip = open ? utf8 ("Aucune prise film\xc3\xa9" "e \xe2\x80\x94 \xe2\x97\x8f ou T pour enregistrer")
-                        : utf8 ("Cam\xc3\xa9ra \xc3\xa9teinte \xe2\x80\x94 clique pour l'activer");
+        if (session.isRecordingTake() && camera.isRecording())
+        {
+            const double start = session.getTakeStartSeconds();
+            const auto r = regionBounds (Track::camera, start, std::max (start + 0.05, session.getPlayheadSeconds()));
+            drawRegionFrame (g, r, theme::rec, utf8 ("\xe2\x97\x8f REC ") + formatDuration (session.getTakeSeconds()), false, false, false);
+            paintThumbnails (g, r.withTrimmedTop (titleStrip).reduced (2.0f, 2.0f), camera.getRecordingThumbnails(),
+                             [start] (double t) { return (int) std::max (0.0, t - start); });
+        }
+        else if (! anyVideo && arrangement.clips.empty())
+        {
+            drawHint (g, lane, camera.isOpen() ? utf8 ("Aucune prise film\xc3\xa9" "e \xe2\x80\x94 T pour enregistrer")
+                                               : utf8 ("Cam\xc3\xa9ra \xc3\xa9teinte \xe2\x80\x94 clique pour l'activer"),
+                      theme::camAccent);
+        }
 
-        // Chip on a dark pill so it stays readable over the thumbnails.
-        const auto font = fonts::display (10.0f);
-        const float chipWidth = juce::GlyphArrangement::getStringWidth (font, chip) + 14.0f;
-        auto pill = juce::Rectangle<float> (region.getX() + 6.0f, region.getY() + 6.0f, std::min (chipWidth, region.getWidth() - 12.0f), 16.0f);
-        g.setColour (juce::Colour (0xff0e0c13).withAlpha (0.75f));
-        g.fillRoundedRectangle (pill, 8.0f);
-        g.setColour (session.isRecordingTake() ? theme::rec : theme::camAccent);
-        g.setFont (font);
-        g.drawText (chip, pill.reduced (7.0f, 0.0f), juce::Justification::centredLeft, true);
+        g.restoreState();
+    }
+
+    bool isClipSelected (int index) const
+    {
+        if (drag.active && drag.moved && drag.duplicate)
+            return index == (int) drag.edited.clips.size() - 1;
+        return session.getSelectedClip() == index;
+    }
+
+    //==============================================================================
+    void showMenu (Hit hit, std::optional<Track> lane, double clickedTime)
+    {
+        juce::PopupMenu menu;
+        auto item = [&menu] (const juce::String& text, const juce::String& shortcut, bool enabled, std::function<void()> action)
+        {
+            juce::PopupMenu::Item i (text);
+            i.shortcutKeyDescription = shortcut;
+            i.isEnabled = enabled;
+            i.action = std::move (action);
+            menu.addItem (i);
+        };
+        auto* timeline = &owner;
+        auto* s = &session;
+        const double playhead = session.getPlayheadSeconds();
+
+        if (hit.kind == Kind::clip)
+        {
+            const auto c = session.getArrangement().clips[(size_t) hit.index];
+            item (utf8 ("Couper \xc3\xa0 la t\xc3\xaate de lecture"), utf8 ("\xe2\x8c\x98T"), playhead > c.start + 0.05 && playhead < c.end() - 0.05,
+                  [s] { s->splitAtPlayhead(); });
+            item ("Dupliquer", utf8 ("\xe2\x8c\x98" "D"), true, [s] { s->duplicateSelection(); });
+            item ("Supprimer", utf8 ("\xe2\x8c\xab"), true, [s] { s->deleteSelection(); });
+            menu.addSeparator();
+            item (utf8 ("Cr\xc3\xa9" "er un cycle sur la r\xc3\xa9gion"), {}, true, [s, c] { s->setCycleRange (c.start, c.end()); s->setCycleOn (true); });
+            item (utf8 ("Exporter cette r\xc3\xa9gion\xe2\x80\xa6"), {}, true, [timeline] { if (timeline->onExportRequested) timeline->onExportRequested(); });
+        }
+        else if (hit.kind == Kind::loop)
+        {
+            const auto a = session.getArrangement();
+            const double end = loopDisplayEnd (a);
+            item (utf8 ("Boucler jusqu'\xc3\xa0 la fin"), {}, ! a.isLoopOpenEnded(), [s] { s->setLoopOpenEnded(); });
+            item (utf8 ("Arr\xc3\xaater la boucle \xc3\xa0 la t\xc3\xaate de lecture"), {}, playhead > a.loopStart + 0.05 && playhead < end,
+                  [s, a, playhead]
+                  {
+                      auto edited = a;
+                      edited.loopEnd = playhead;
+                      s->applyEdit (edited, utf8 ("Arr\xc3\xaater la boucle"));
+                  });
+            menu.addSeparator();
+            item (utf8 ("Cr\xc3\xa9" "er un cycle sur la boucle"), {}, true, [s, a]
+                  {
+                      s->setCycleRange (a.loopStart, a.loopStart + s->getLoopLengthSeconds());
+                      s->setCycleOn (true);
+                  });
+            item (utf8 ("Exporter cette r\xc3\xa9gion\xe2\x80\xa6"), {}, true, [timeline] { if (timeline->onExportRequested) timeline->onExportRequested(); });
+            menu.addSeparator();
+            item ("Effacer la boucle", utf8 ("\xe2\x87\xa7\xe2\x8c\xab"), true, [s] { s->clearLoop(); });
+        }
+        else
+        {
+            if (lane != Track::loop)
+            {
+                juce::PopupMenu takesMenu;
+                const auto& takes = session.getTakes();
+                for (int i = 0; i < (int) takes.size(); ++i)
+                    takesMenu.addItem (takes[(size_t) i].name + (session.isTakeUsed (i) ? juce::String() : utf8 (" (hors timeline)")),
+                                       [s, i, clickedTime] { s->insertTake (i, clickedTime); });
+                if (takes.empty())
+                    takesMenu.addItem (utf8 ("Aucune prise enregistr\xc3\xa9" "e"), false, false, [] {});
+                menu.addSubMenu (utf8 ("Ins\xc3\xa9rer une prise ici"), takesMenu);
+            }
+            item (utf8 ("Placer la t\xc3\xaate de lecture ici"), {}, ! session.isRecordingTake(), [s, clickedTime] { s->locate (clickedTime); });
+        }
+
+        menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition());
     }
 
     Timeline& owner;
     Session& session;
-    roadie::ui::MuteSoloButton muteButton, soloButton;
+    Hit hover;
+
+    struct Drag
+    {
+        bool active = false, moved = false, duplicate = false;
+        Hit hit;
+        Arrangement origin, edited;
+        double downTime = 0.0, loopVisibleEnd = 0.0;
+    };
+    Drag drag;
+
     std::vector<float> overview;
     int overviewLength = -1, overviewLayers = -1;
     double overviewTime = 0.0;
 };
 
 //==============================================================================
-class Timeline::PlayheadOverlay : public juce::Component
+// Playhead and the hover guide, over the ruler and the lanes.
+class Timeline::Overlay : public juce::Component
 {
 public:
-    explicit PlayheadOverlay (Timeline& o) : owner (o)
-    {
-        setInterceptsMouseClicks (false, false);
-    }
+    explicit Overlay (Timeline& o) : owner (o) { setInterceptsMouseClicks (false, false); }
 
     void paint (juce::Graphics& g) override
     {
-        const float laneWidth = (float) (getWidth() - headWidth);
-        const float x = (float) headWidth + owner.getPlayheadProportion() * laneWidth;
+        const float top = (float) rulerHeight;
 
-        g.setColour (theme::text);
-        g.fillRect (juce::Rectangle<float> (x - 0.75f, (float) rulerHeight, 1.5f, (float) (getHeight() - rulerHeight)));
+        if (owner.hoverX >= 0.0f && ! owner.arrange->isDragging())
+        {
+            g.setColour (theme::text.withAlpha (0.12f));
+            g.fillRect (juce::Rectangle<float> (std::round (owner.hoverX), Ruler::bandHeight + 4.0f, 1.0f, (float) getHeight()));
+        }
 
+        const float x = owner.timeToX (owner.session.getPlayheadSeconds());
+        if (x < -6.0f || x > (float) getWidth() + 6.0f)
+            return;
+
+        g.setColour (owner.session.isRecordingTake() ? theme::rec : theme::text);
+        g.fillRect (juce::Rectangle<float> (x - 0.75f, top - 1.0f, 1.5f, (float) getHeight() - top + 1.0f));
         juce::Path head;
-        head.addTriangle (x - 5.0f, (float) rulerHeight - 6.0f, x + 5.0f, (float) rulerHeight - 6.0f, x, (float) rulerHeight);
+        head.addTriangle (x - 6.0f, top - 9.0f, x + 6.0f, top - 9.0f, x, top - 1.0f);
         g.fillPath (head);
     }
 
@@ -526,6 +1418,8 @@ private:
 };
 
 //==============================================================================
+// Floating monitor: the live camera (DIRECT), or the arrangement's video
+// under the playhead while it plays back or right after a locate (LECTURE).
 class Timeline::CameraMonitor : public juce::Component,
                                 public juce::SettableTooltipClient
 {
@@ -541,9 +1435,14 @@ public:
     void refresh()
     {
         const int frame = session.getCamera().getFrameCounter();
-        if (frame != lastFrame || session.isRecordingTake() || session.isCameraOpening())
+        const int previewFrame = session.getPreviewFrameCounter();
+        const bool previewing = session.isPreviewingArrangement();
+        if (frame != lastFrame || previewFrame != lastPreviewFrame || previewing != wasPreviewing
+            || session.isRecordingTake() || session.isCameraOpening())
         {
             lastFrame = frame;
+            lastPreviewFrame = previewFrame;
+            wasPreviewing = previewing;
             repaint();
         }
     }
@@ -580,7 +1479,7 @@ public:
     {
         if (auto* parent = getParentComponent())
         {
-            auto area = parent->getLocalBounds().withTrimmedTop (rulerHeight).withTrimmedLeft (headWidth);
+            auto area = parent->getLocalBounds().withTrimmedTop (rulerHeight).withTrimmedLeft (owner.getHeaderWidth()).withTrimmedBottom (scrollbarHeight);
             setBounds (getBounds().constrainedWithin (area));
         }
     }
@@ -589,6 +1488,7 @@ public:
     {
         using namespace theme;
         auto bounds = getLocalBounds().toFloat();
+        const bool previewing = session.isPreviewingArrangement();
 
         juce::Path card;
         card.addRoundedRectangle (bounds, radiusMd);
@@ -598,29 +1498,40 @@ public:
         g.saveState();
         g.reduceClipRegion (card);
 
-        // Title bar.
+        // Title bar, with the source on the right.
         auto bar = bounds.removeFromTop ((float) barHeight);
         g.setColour (camAccent.withAlpha (0.16f));
         g.fillRect (bar);
         auto barContent = bar.reduced (8.0f, 0.0f);
         icons::draw (g, icons::Icon::camera, barContent.removeFromLeft (10.0f).withSizeKeepingCentre (10.0f, 10.0f), camAccent, 2.5f);
         barContent.removeFromLeft (5.0f);
+
+        const auto badge = previewing ? juce::String ("LECTURE") : juce::String ("DIRECT");
+        const auto badgeColour = previewing ? loopAccent : (session.isRecordingTake() ? rec : camAccent);
+        const auto badgeFont = fonts::display (9.0f).withExtraKerningFactor (0.06f);
+        const float badgeWidth = juce::GlyphArrangement::getStringWidth (badgeFont, badge) + 12.0f;
+        auto badgeArea = barContent.removeFromRight (badgeWidth).withSizeKeepingCentre (badgeWidth, 14.0f);
+        g.setColour (badgeColour.withAlpha (0.2f));
+        g.fillRoundedRectangle (badgeArea, 7.0f);
+        g.setColour (badgeColour);
+        g.setFont (badgeFont);
+        g.drawText (badge, badgeArea, juce::Justification::centred, false);
+
         g.setColour (camAccent);
         g.setFont (fonts::display (10.0f).withExtraKerningFactor (0.04f));
-        g.drawText (utf8 ("MONITEUR CAM\xc3\x89RA"), barContent, juce::Justification::centredLeft, false);
-        for (int i = 0; i < 3; ++i)
-            g.fillEllipse (bar.getRight() - 10.0f - (float) i * 5.0f, bar.getCentreY() - 1.5f, 3.0f, 3.0f);
+        g.drawText (utf8 ("CAM\xc3\x89RA"), barContent, juce::Justification::centredLeft, false);
 
-        // Preview.
+        // Picture.
         auto preview = bounds;
         auto& camera = session.getCamera();
-        const auto image = camera.isOpen() ? camera.getLatestFrame() : juce::Image();
+        const auto image = previewing ? session.getPreviewFrame() : (camera.isOpen() ? camera.getLatestFrame() : juce::Image());
 
         if (image.isValid())
         {
             g.saveState();
-            // Mirrored, like a selfie view: moving your left hand moves it left.
-            g.addTransform (juce::AffineTransform::scale (-1.0f, 1.0f, preview.getCentreX(), 0.0f));
+            // Live is mirrored, like a selfie view; playback shows the movie as it will be exported.
+            if (! previewing)
+                g.addTransform (juce::AffineTransform::scale (-1.0f, 1.0f, preview.getCentreX(), 0.0f));
             g.drawImage (image, preview, juce::RectanglePlacement::fillDestination);
             g.restoreState();
         }
@@ -636,22 +1547,26 @@ public:
             // The preview is a dark "screen" in both themes: fixed light text.
             g.setColour (juce::Colour (0xffb9b5ad));
             g.setFont (fonts::semibold (11.0f));
-            const auto message = session.isCameraOpening() ? utf8 ("Ouverture de la cam\xc3\xa9ra\xe2\x80\xa6")
+            const auto message = previewing ? utf8 ("Pas de vid\xc3\xa9o ici")
+                                 : session.isCameraOpening() ? utf8 ("Ouverture de la cam\xc3\xa9ra\xe2\x80\xa6")
                                  : session.getCameraError().isNotEmpty() ? session.getCameraError()
                                  : CameraCapture::isSupported() ? utf8 ("Cam\xc3\xa9ra \xc3\xa9teinte \xe2\x80\x94 clique pour l'activer")
                                                                 : utf8 ("Cam\xc3\xa9ra indisponible sur ce syst\xc3\xa8me");
             g.drawFittedText (message, preview.reduced (12.0f).toNearestInt(), juce::Justification::centred, 4);
         }
 
-        // Framing guides.
-        const auto guides = preview.reduced (preview.getWidth() * 0.09f, preview.getHeight() * 0.09f);
-        juce::Path guidePath;
-        guidePath.addRoundedRectangle (guides, 6.0f);
-        juce::Path dashed;
-        const float dashes[] = { 4.0f, 4.0f };
-        juce::PathStrokeType (1.0f).createDashedStroke (dashed, guidePath, dashes, 2);
-        g.setColour (text.withAlpha (0.18f));
-        g.fillPath (dashed);
+        // Framing guides (live only: they help placing yourself).
+        if (! previewing)
+        {
+            const auto guides = preview.reduced (preview.getWidth() * 0.09f, preview.getHeight() * 0.09f);
+            juce::Path guidePath;
+            guidePath.addRoundedRectangle (guides, 6.0f);
+            juce::Path dashed;
+            const float dashes[] = { 4.0f, 4.0f };
+            juce::PathStrokeType (1.0f).createDashedStroke (dashed, guidePath, dashes, 2);
+            g.setColour (text.withAlpha (0.18f));
+            g.fillPath (dashed);
+        }
 
         // REC indicator.
         if (session.isRecordingTake())
@@ -667,7 +1582,7 @@ public:
         }
 
         // Sync pill.
-        if (camera.isOpen())
+        if (camera.isOpen() && ! previewing)
         {
             const auto ms = juce::roundToInt (session.getSyncLagMs());
             const auto label = session.isCalibrated() ? utf8 ("Sync ") + (ms >= 0 ? "+" : "") + juce::String (ms) + " ms"
@@ -684,7 +1599,7 @@ public:
 
         g.restoreState();
 
-        g.setColour (camAccent);
+        g.setColour (previewing ? loopAccent.withAlpha (0.8f) : camAccent);
         g.drawRoundedRectangle (getLocalBounds().toFloat().reduced (0.5f), radiusMd, 1.0f);
     }
 
@@ -700,50 +1615,201 @@ private:
     juce::ComponentDragger dragger;
     juce::ComponentBoundsConstrainer constrainer;
     juce::DropShadower shadower { juce::DropShadow (juce::Colours::black.withAlpha (0.6f), 24, { 0, 10 }) };
-    int lastFrame = -1;
+    int lastFrame = -1, lastPreviewFrame = -1;
+    bool wasPreviewing = false;
 };
 
 //==============================================================================
 Timeline::Timeline (Session& s) : session (s)
 {
-    for (auto t : { Track::amp, Track::loop, Track::camera })
+    for (auto t : allTracks)
     {
-        rows.push_back (std::make_unique<TrackRow> (*this, session, t));
-        addAndMakeVisible (*rows.back());
+        headers.push_back (std::make_unique<TrackHeader> (*this, session, t));
+        addAndMakeVisible (*headers.back());
     }
 
-    playhead = std::make_unique<PlayheadOverlay> (*this);
-    addAndMakeVisible (*playhead);
+    zoom = std::make_unique<ZoomControl> (*this);
+    addAndMakeVisible (*zoom);
+    ruler = std::make_unique<Ruler> (*this, session);
+    addAndMakeVisible (*ruler);
+    arrange = std::make_unique<ArrangeView> (*this, session);
+    addAndMakeVisible (*arrange);
+
+    scrollbar.setAutoHide (false);
+    scrollbar.addListener (this);
+    addAndMakeVisible (scrollbar);
+
+    overlay = std::make_unique<Overlay> (*this);
+    addAndMakeVisible (*overlay);
 
     monitor = std::make_unique<CameraMonitor> (*this, session);
     addAndMakeVisible (*monitor);
 }
 
-Timeline::~Timeline() = default;
+Timeline::~Timeline()
+{
+    scrollbar.removeListener (this);
+}
 
 void Timeline::setSelectedTrack (Track track)
 {
     selected = track;
-    for (auto& r : rows)
-        r->repaint();
+    for (auto& h : headers)
+        h->repaint();
+    arrange->repaint();
 }
 
-float Timeline::getPlayheadProportion() const
+double Timeline::getVisibleLength() const noexcept
 {
-    const auto& engine = session.getEngine();
-    const auto window = timelineWindowSamples (session);
-    if (window <= 0)
-        return 0.0f;
-    return (float) (engine.getTransportPosition() % window) / (float) window;
+    return (double) laneWidth() / pixelsPerSecond;
+}
+
+double Timeline::getGridStep() const
+{
+    const double beat = session.getSecondsPerBeat();
+    if (beat * pixelsPerSecond >= 14.0)
+        return beat;
+    double step = session.getSecondsPerBar();
+    while (step * pixelsPerSecond < 14.0)
+        step *= 2.0;
+    return step;
+}
+
+double Timeline::snap (double seconds, bool enabled) const
+{
+    if (! enabled)
+        return std::max (0.0, seconds);
+    const double step = getGridStep();
+    return std::max (0.0, std::round (seconds / step) * step);
+}
+
+double Timeline::getScrollableLength() const
+{
+    const double content = std::max ({ session.getContentEnd(), session.getPlayheadSeconds(), session.getCycleRange().getEnd(),
+                                       8.0 * session.getSecondsPerBar() });
+    return std::max (content + 4.0 * session.getSecondsPerBar(), viewStart + getVisibleLength());
+}
+
+void Timeline::setView (double start, double pps)
+{
+    pixelsPerSecond = juce::jlimit (minPixelsPerSecond, maxPixelsPerSecond, pps);
+    viewStart = std::max (0.0, start);
+    updateScrollbar();
+    repaintView();
+}
+
+void Timeline::zoomAround (double anchorSeconds, float anchorX, double factor)
+{
+    const double pps = juce::jlimit (minPixelsPerSecond, maxPixelsPerSecond, pixelsPerSecond * factor);
+    setView (anchorSeconds - (double) anchorX / pps, pps);
+}
+
+void Timeline::zoomBy (double factor)
+{
+    const double playhead = session.getPlayheadSeconds();
+    const float x = timeToX (playhead);
+    if (x >= 0.0f && x <= (float) laneWidth())
+        zoomAround (playhead, x, factor);
+    else
+        zoomAround (xToTime ((float) laneWidth() * 0.5f), (float) laneWidth() * 0.5f, factor);
+}
+
+void Timeline::zoomToFit()
+{
+    const double length = std::max (session.getContentEnd(), 8.0 * session.getSecondsPerBar()) * 1.12;
+    setView (0.0, (double) laneWidth() / length);
+}
+
+void Timeline::userScrolled()
+{
+    lastUserScroll = nowSeconds();
+}
+
+void Timeline::updateScrollbar()
+{
+    scrollbar.setRangeLimits (0.0, getScrollableLength(), juce::dontSendNotification);
+    scrollbar.setCurrentRange (viewStart, getVisibleLength(), juce::dontSendNotification);
+}
+
+void Timeline::scrollBarMoved (juce::ScrollBar*, double newRangeStart)
+{
+    userScrolled();
+    viewStart = std::max (0.0, newRangeStart);
+    repaintView();
+}
+
+void Timeline::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
+{
+    const auto local = e.getEventRelativeTo (arrange.get()).position;
+    if (e.mods.isCommandDown() || e.mods.isCtrlDown())
+    {
+        zoomAround (xToTime (local.x), local.x, std::pow (1.6, (double) wheel.deltaY * 4.0));
+        return;
+    }
+
+    const float delta = std::abs (wheel.deltaX) > std::abs (wheel.deltaY) ? wheel.deltaX : wheel.deltaY;
+    userScrolled();
+    setView (viewStart - (double) delta * 400.0 / pixelsPerSecond, pixelsPerSecond);
+}
+
+void Timeline::mouseMagnify (const juce::MouseEvent& e, float scaleFactor)
+{
+    const auto local = e.getEventRelativeTo (arrange.get()).position;
+    zoomAround (xToTime (local.x), local.x, (double) scaleFactor);
+}
+
+void Timeline::followPlayhead()
+{
+    if (! session.isPlaying() || arrange->isDragging() || nowSeconds() - lastUserScroll < 2.0)
+        return;
+
+    const double playhead = session.getPlayheadSeconds();
+    const float x = timeToX (playhead);
+    if (x > (float) laneWidth() * 0.92f || x < 0.0f)
+        setView (playhead - getVisibleLength() * 0.08, pixelsPerSecond);
+}
+
+void Timeline::setHoverX (float x)
+{
+    if (! juce::approximatelyEqual (x, hoverX))
+    {
+        hoverX = x;
+        overlay->repaint();
+    }
+}
+
+void Timeline::repaintView()
+{
+    ruler->repaint();
+    arrange->repaint();
+    overlay->repaint();
 }
 
 void Timeline::refresh()
 {
-    for (auto& r : rows)
-        r->refreshState();
-    playhead->repaint();
+    if (! viewInitialised && getWidth() > headerWidth)
+    {
+        viewInitialised = true;
+        zoomToFit();
+    }
+
+    for (auto& h : headers)
+        h->refreshState();
+
+    followPlayhead();
+
+    auto signature = arrange->signature();
+    if (arrange->isLive() || signature != lastSignature)
+    {
+        lastSignature = std::move (signature);
+        arrange->repaint();
+        ruler->repaint();
+        updateScrollbar();
+    }
+
+    overlay->repaint();
     monitor->refresh();
-    repaint (0, 0, getWidth(), rulerHeight);
+    zoom->repaint();
 }
 
 void Timeline::paint (juce::Graphics& g)
@@ -751,74 +1817,45 @@ void Timeline::paint (juce::Graphics& g)
     using namespace theme;
     g.fillAll (surfaceSunken);
 
-    auto ruler = getLocalBounds().removeFromTop (rulerHeight).toFloat();
+    // Corner above the headers (the zoom control lives here).
+    auto corner = juce::Rectangle<int> (0, 0, headerWidth, rulerHeight);
+    g.setColour (surface);
+    g.fillRect (corner);
     g.setColour (border);
-    g.drawHorizontalLine (rulerHeight - 1, 0.0f, (float) getWidth());
+    g.drawHorizontalLine (rulerHeight - 1, 0.0f, (float) headerWidth);
+    g.drawVerticalLine (headerWidth - 1, 0.0f, (float) getHeight());
 
-    auto gutter = ruler.removeFromLeft ((float) headWidth);
     g.setColour (textFaint);
     g.setFont (fonts::semibold (9.5f).withExtraKerningFactor (0.06f));
-    g.drawText ("MESURES", gutter.reduced (12.0f, 0.0f), juce::Justification::centredLeft, false);
+    g.drawText ("PISTES", corner.reduced (15, 0), juce::Justification::centredLeft, false);
 
-    const double window = (double) timelineWindowSamples (session);
-    const double perBar = session.getSamplesPerBar();
-    if (window <= 0.0 || perBar <= 0.0)
-        return;
-
-    const double pixelsPerBar = ruler.getWidth() * perBar / window;
-    int every = 1;
-    while (pixelsPerBar * every < 30.0)
-        every *= 2;
-
-    g.setFont (fonts::medium (10.5f));
-    for (int bar = 0; bar * perBar < window; ++bar)
-    {
-        const float x = ruler.getX() + (float) (bar * pixelsPerBar);
-        if (bar % every == 0)
-        {
-            g.setColour (border);
-            g.drawVerticalLine ((int) x, ruler.getY(), ruler.getBottom());
-            g.setColour (textFaint);
-            fonts::drawTabular (g, juce::String (bar + 1), { x + 4.0f, ruler.getY() + 8.0f, 30.0f, ruler.getHeight() - 8.0f },
-                                juce::Justification::centredLeft);
-        }
-        else
-        {
-            g.setColour (border);
-            g.drawVerticalLine ((int) x, ruler.getBottom() - 6.0f, ruler.getBottom());
-        }
-    }
-
-    // Loop bracket across the first pass.
-    const auto& looper = session.getEngine().getLooper();
-    const double length = looper.getRecordedLengthSamples();
-    if (length > 0.0 && looper.getState() != Looper::State::Recording)
-    {
-        const float width = (float) (ruler.getWidth() * length / window);
-        auto bracket = juce::Rectangle<float> (ruler.getX() + 4.0f, ruler.getY() + 2.0f, width - 8.0f, 9.0f);
-        const auto label = "boucle " + formatBars (length / perBar) + " mes.";
-        const auto font = fonts::display (9.5f);
-        const float labelWidth = juce::GlyphArrangement::getStringWidth (font, label);
-        g.setColour (loopAccent);
-        g.setFont (font);
-        g.drawText (label, bracket.withWidth (labelWidth + 2.0f), juce::Justification::centredLeft, false);
-        g.setColour (loopAccent.withAlpha (0.5f));
-        g.fillRect (juce::Rectangle<float> (bracket.getX() + labelWidth + 6.0f, bracket.getCentreY(), std::max (0.0f, bracket.getWidth() - labelWidth - 6.0f), 1.0f));
-    }
+    // Below the headers: the empty part of the column.
+    g.setColour (surface.withAlpha (0.55f));
+    g.fillRect (juce::Rectangle<int> (0, rulerHeight + 3 * rowHeight, headerWidth - 1, getHeight()));
 }
 
 void Timeline::resized()
 {
-    auto area = getLocalBounds().withTrimmedTop (rulerHeight);
-    const int rowHeight = juce::jlimit (66, 110, area.getHeight() / (int) rows.size());
-    for (auto& r : rows)
-        r->setBounds (area.removeFromTop (rowHeight));
+    auto area = getLocalBounds();
+    auto top = area.removeFromTop (rulerHeight);
+    zoom->setBounds (top.removeFromLeft (headerWidth - 1).removeFromRight (96).reduced (8, 8));
+    ruler->setBounds (top);
 
-    playhead->setBounds (getLocalBounds());
+    auto lanes = area.withTrimmedLeft (headerWidth);
+    scrollbar.setBounds (lanes.removeFromBottom (scrollbarHeight));
+    arrange->setBounds (lanes);
+
+    rowHeight = juce::jlimit (56, 100, (area.getHeight() - scrollbarHeight) / 3);
+    auto headerColumn = area.removeFromLeft (headerWidth - 1);
+    for (auto& h : headers)
+        h->setBounds (headerColumn.removeFromTop (rowHeight));
+
+    overlay->setBounds (getLocalBounds().withTrimmedLeft (headerWidth).withTrimmedBottom (scrollbarHeight));
+    updateScrollbar();
 
     if (! monitorPlaced && getWidth() > 0)
     {
-        monitor->setTopLeftPosition (getWidth() - monitor->getWidth() - 16, getHeight() - monitor->getHeight() - 16);
+        monitor->setTopLeftPosition (getWidth() - monitor->getWidth() - 16, getHeight() - scrollbarHeight - monitor->getHeight() - 12);
         monitorPlaced = true;
     }
     monitor->keepInside();

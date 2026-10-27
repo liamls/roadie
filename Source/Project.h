@@ -56,7 +56,8 @@ struct Clip
     double end() const { return start + length; }
     bool operator== (const Clip& o) const
     {
-        return take == o.take && start == o.start && sourceStart == o.sourceStart && length == o.length;
+        return take == o.take && juce::exactlyEqual (start, o.start) && juce::exactlyEqual (sourceStart, o.sourceStart)
+               && juce::exactlyEqual (length, o.length);
     }
 };
 
@@ -80,7 +81,8 @@ struct Arrangement
 
     bool operator== (const Arrangement& o) const
     {
-        return clips == o.clips && loopAnchor == o.loopAnchor && loopStart == o.loopStart && loopEnd == o.loopEnd;
+        return clips == o.clips && juce::exactlyEqual (loopAnchor, o.loopAnchor) && juce::exactlyEqual (loopStart, o.loopStart)
+               && juce::exactlyEqual (loopEnd, o.loopEnd);
     }
     bool operator!= (const Arrangement& o) const { return ! (*this == o); }
 };

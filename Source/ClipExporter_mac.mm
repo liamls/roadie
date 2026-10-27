@@ -61,7 +61,8 @@ CALayer* makeTitleLayer (const juce::String& title, CGSize renderSize)
     CGColorRef shadow = CGColorCreateGenericRGB (0.0, 0.0, 0.0, 0.65);
     NSDictionary* attributes = @{ (id) kCTFontAttributeName: (__bridge id) font,
                                   (id) kCTForegroundColorAttributeName: (__bridge id) colour };
-    NSString* text = [NSString stringWithUTF8String: title.toRawUTF8()] ?: @"";
+    NSString* utf8Title = [NSString stringWithUTF8String: title.toRawUTF8()];
+    NSString* text = utf8Title != nil ? utf8Title : @"";
     NSAttributedString* string = [[NSAttributedString alloc] initWithString: text attributes: attributes];
     CTLineRef line = CTLineCreateWithAttributedString ((__bridge CFAttributedStringRef) string);
 
