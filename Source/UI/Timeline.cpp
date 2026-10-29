@@ -99,24 +99,25 @@ constexpr float regionRadius = 5.0f;
 constexpr float titleStrip = 15.0f;
 
 // A region the GarageBand way: tinted body, a coloured title strip with the
-// name, a border that lights up on hover and turns solid when selected.
+// name, a border that lights up on hover (`hover` fades from 0 to 1) and
+// turns solid when selected.
 void drawRegionFrame (juce::Graphics& g, juce::Rectangle<float> r, juce::Colour colour, const juce::String& name,
-                      bool selected, bool hovered, bool dim)
+                      bool selected, float hover, bool dim)
 {
     const float alpha = dim ? 0.45f : 1.0f;
     juce::Path shape;
     shape.addRoundedRectangle (r, regionRadius);
 
-    g.setColour (colour.withAlpha ((selected ? 0.26f : (hovered ? 0.2f : 0.15f)) * alpha));
+    g.setColour (colour.withAlpha ((selected ? 0.26f : 0.15f + 0.05f * hover) * alpha));
     g.fillPath (shape);
 
     g.saveState();
     g.reduceClipRegion (shape);
-    g.setColour (colour.withAlpha ((selected ? 0.9f : (hovered ? 0.45f : 0.32f)) * alpha));
+    g.setColour (colour.withAlpha ((selected ? 0.9f : 0.32f + 0.13f * hover) * alpha));
     g.fillRect (r.withHeight (titleStrip));
     g.restoreState();
 
-    g.setColour (colour.withAlpha ((selected ? 1.0f : (hovered ? 0.75f : 0.45f)) * alpha));
+    g.setColour (colour.withAlpha ((selected ? 1.0f : 0.45f + 0.3f * hover) * alpha));
     g.drawRoundedRectangle (r.reduced (0.5f), regionRadius, selected ? 1.5f : 1.0f);
 
     if (name.isNotEmpty() && r.getWidth() > 18.0f)
@@ -181,11 +182,11 @@ public:
         auto track = getLocalBounds().toFloat().reduced (5.0f, 0.0f);
         const float y = track.getCentreY();
         const float x = track.getX() + proportion() * track.getWidth();
-        const bool active = isMouseOverOrDragging();
+        const float active = fade.get (isMouseOverOrDragging());
 
         g.setColour (theme::border);
         g.fillRoundedRectangle (track.withHeight (3.0f).withCentre ({ track.getCentreX(), y }), 1.5f);
-        g.setColour (accent.withAlpha (active ? 0.9f : 0.6f));
+        g.setColour (accent.withAlpha (0.6f + 0.3f * active));
         g.fillRoundedRectangle (juce::Rectangle<float> (track.getX(), y - 1.5f, x - track.getX(), 3.0f), 1.5f);
 
         // 0 dB tick.
@@ -193,7 +194,7 @@ public:
         g.setColour (theme::textFaint);
         g.fillRect (juce::Rectangle<float> (zeroX - 0.5f, y + 3.0f, 1.0f, 3.0f));
 
-        const float r = active ? 5.5f : 4.5f;
+        const float r = 4.5f + active;
         g.setColour (theme::text);
         g.fillEllipse (x - r, y - r, r * 2.0f, r * 2.0f);
     }
@@ -230,6 +231,7 @@ private:
 
     juce::Colour accent;
     float value = 1.0e9f;
+    roadie::ui::HoverFade fade { *this };
 };
 
 //==============================================================================
@@ -315,7 +317,8 @@ public:
         const bool active = owner.getSelectedTrack() == track;
         const auto accent = accentOf (track);
 
-        g.setColour (active ? surfaceRaised : (isMouseOver (true) ? surface.interpolatedWith (surfaceRaised, 0.45f) : surface));
+        const float hover = fade.get (isMouseOver (true));
+        g.setColour (active ? surfaceRaised : surface.interpolatedWith (surfaceRaised, 0.45f * hover));
         g.fillRect (area);
         if (active)
         {
@@ -395,6 +398,7 @@ private:
     roadie::ui::Meter meter;
     juce::Rectangle<int> labels, iconArea;
     juce::String shownSubtitle;
+    roadie::ui::HoverFade fade { *this };
 };
 
 //==============================================================================
@@ -415,7 +419,7 @@ public:
         auto area = getLocalBounds().toFloat();
         const auto minus = area.removeFromLeft (14.0f);
         const auto plus = area.removeFromRight (14.0f);
-        const auto colour = isMouseOverOrDragging() ? theme::textMuted : theme::textFaint;
+        const auto colour = theme::textFaint.interpolatedWith (theme::textMuted, fade.get (isMouseOverOrDragging()));
 
         g.setColour (colour);
         g.fillRect (juce::Rectangle<float> (7.0f, 1.5f).withCentre (minus.getCentre()));
@@ -460,6 +464,7 @@ private:
 
     Timeline& owner;
     juce::Rectangle<float> track;
+    roadie::ui::HoverFade fade { *this };
 };
 
 //==============================================================================
@@ -747,7 +752,7 @@ public:
         const auto hit = hitTestAt (e.position);
         if (hit != hover)
         {
-            hover = hit;
+            setHover (hit);
             repaint();
         }
         setMouseCursor (hit.zone == Zone::body || hit.kind == Kind::none ? juce::MouseCursor::NormalCursor
@@ -759,7 +764,7 @@ public:
         owner.setHoverX (-1.0f);
         if (hover.kind != Kind::none)
         {
-            hover = {};
+            setHover ({});
             repaint();
         }
     }
@@ -1062,7 +1067,7 @@ private:
             const bool isSelected = isClipSelected (i);
             const bool hovered = hover.kind == Kind::clip && hover.index == i;
             const auto name = juce::isPositiveAndBelow (c.take, (int) takes.size()) ? takes[(size_t) c.take].name : juce::String ("?");
-            drawRegionFrame (g, r, theme::ampAccent, name, isSelected, hovered, muted);
+            drawRegionFrame (g, r, theme::ampAccent, name, isSelected, hoverAmount (Kind::clip, i), muted);
 
             const auto wave = r.withTrimmedTop (titleStrip).reduced (1.0f, 3.0f);
             if (const auto* media = session.getTakeMedia (c.take))
@@ -1150,7 +1155,7 @@ private:
                                                                   + juce::String (layers) + (layers > 1 ? " couches" : " couche");
             if (arrangement.isLoopOpenEnded())
                 name << utf8 (" \xc2\xb7 jusqu'\xc3\xa0 la fin");
-            drawRegionFrame (g, r, colour, name, isSelected, hovered, muted);
+            drawRegionFrame (g, r, colour, name, isSelected, hoverAmount (Kind::loop, -1), muted);
 
             // Notches at each repeat, like a looped region in GarageBand.
             const auto body = r.withTrimmedTop (titleStrip);
@@ -1258,7 +1263,8 @@ private:
             anyVideo = anyVideo || video;
             const bool isSelected = isClipSelected (i);
             const bool hovered = hover.kind == Kind::clip && hover.index == i;
-            drawRegionFrame (g, r, theme::camAccent, video ? take.name : take.name + utf8 (" \xc2\xb7 audio seul"), isSelected, hovered, ! video);
+            drawRegionFrame (g, r, theme::camAccent, video ? take.name : take.name + utf8 (" \xc2\xb7 audio seul"), isSelected,
+                             hoverAmount (Kind::clip, i), ! video);
 
             if (video)
             {
@@ -1367,9 +1373,31 @@ private:
         menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition());
     }
 
+    // The region under the mouse fades in while the previous one fades out.
+    void setHover (const Hit& hit)
+    {
+        if (hit.kind != hover.kind || hit.index != hover.index)
+        {
+            fadingOut = hover;
+            fadeOut.reset (hover.kind != Kind::none);
+            fadeIn.reset (false);
+        }
+        hover = hit;
+    }
+
+    float hoverAmount (Kind kind, int index)
+    {
+        if (kind == hover.kind && (kind == Kind::loop || index == hover.index))
+            return fadeIn.get (! drag.active);
+        if (kind == fadingOut.kind && (kind == Kind::loop || index == fadingOut.index))
+            return fadeOut.get (false);
+        return 0.0f;
+    }
+
     Timeline& owner;
     Session& session;
-    Hit hover;
+    Hit hover, fadingOut;
+    roadie::ui::HoverFade fadeIn { *this }, fadeOut { *this };
 
     struct Drag
     {
@@ -1642,6 +1670,17 @@ Timeline::Timeline (Session& s) : session (s)
     overlay = std::make_unique<Overlay> (*this);
     addAndMakeVisible (*overlay);
 
+    headerSplitter.onDragStart = [this] { headerWidthAtDragStart = headerWidth; };
+    headerSplitter.onDrag = [this] (int delta) { setHeaderWidth (headerWidthAtDragStart + delta); };
+    headerSplitter.onDragEnd = [this] { if (onHeaderWidthChanged) onHeaderWidthChanged (headerWidth); };
+    headerSplitter.onDoubleClick = [this]
+    {
+        setHeaderWidth (defaultHeaderWidth);
+        if (onHeaderWidthChanged)
+            onHeaderWidthChanged (headerWidth);
+    };
+    addAndMakeVisible (headerSplitter);
+
     monitor = std::make_unique<CameraMonitor> (*this, session);
     addAndMakeVisible (*monitor);
 }
@@ -1649,6 +1688,28 @@ Timeline::Timeline (Session& s) : session (s)
 Timeline::~Timeline()
 {
     scrollbar.removeListener (this);
+}
+
+void Timeline::setHeaderWidth (int width)
+{
+    width = juce::jlimit (minHeaderWidth, maxHeaderWidth, width);
+    if (width != headerWidth)
+    {
+        headerWidth = width;
+        resized();
+        repaint();
+    }
+}
+
+juce::Point<int> Timeline::getLanePoint (Track track, double seconds) const
+{
+    const int index = track == Track::amp ? 0 : (track == Track::loop ? 1 : 2);
+    return { headerWidth + juce::roundToInt (timeToX (seconds)), rulerHeight + index * rowHeight + rowHeight / 2 };
+}
+
+juce::Point<int> Timeline::getRulerPoint (double seconds, bool cycleBand) const
+{
+    return { ruler->getX() + juce::roundToInt (timeToX (seconds)), cycleBand ? (int) Ruler::bandHeight / 2 : rulerHeight - 8 };
 }
 
 void Timeline::setSelectedTrack (Track track)
@@ -1851,6 +1912,8 @@ void Timeline::resized()
         h->setBounds (headerColumn.removeFromTop (rowHeight));
 
     overlay->setBounds (getLocalBounds().withTrimmedLeft (headerWidth).withTrimmedBottom (scrollbarHeight));
+    headerSplitter.setBounds (headerWidth - 1 - roadie::ui::Splitter::thickness / 2, rulerHeight,
+                              roadie::ui::Splitter::thickness, getHeight() - rulerHeight);
     updateScrollbar();
 
     if (! monitorPlaced && getWidth() > 0)

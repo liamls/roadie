@@ -37,6 +37,7 @@ LibraryPanel::LibraryPanel (Session& s)
     list.setWantsKeyboardFocus (false);
     list.setMouseClickGrabsKeyboardFocus (false);
     list.getViewport()->setScrollBarThickness (8);
+    list.addMouseListener (this, true);
     addAndMakeVisible (list);
 
     addFolderButton.setTooltip (utf8 ("Ajouter un dossier de captures \xc3\xa0 la biblioth\xc3\xa8que"));
@@ -111,14 +112,10 @@ void LibraryPanel::paintListBoxItem (int row, juce::Graphics& g, int width, int 
     const bool isLoaded = c.file.getFullPathName() == lastLoadedPath;
     auto bounds = juce::Rectangle<float> (0, 0, (float) width, (float) height).reduced (0.0f, 0.5f);
 
-    if (isLoaded)
+    const float hover = row == hoveredRow ? rowFadeIn.get (true) : (row == fadingRow ? rowFadeOut.get (false) : 0.0f);
+    if (isLoaded || hover > 0.0f)
     {
-        g.setColour (ampAccent.withAlpha (0.12f));
-        g.fillRoundedRectangle (bounds, radiusSm);
-    }
-    else if (list.getRowContainingPosition (list.getMouseXYRelative().x, list.getMouseXYRelative().y) == row && list.isMouseOver (true))
-    {
-        g.setColour (theme::text.withAlpha (0.03f));
+        g.setColour (isLoaded ? ampAccent.withAlpha (0.12f + 0.05f * hover) : theme::text.withAlpha (0.05f * hover));
         g.fillRoundedRectangle (bounds, radiusSm);
     }
 
@@ -138,6 +135,33 @@ void LibraryPanel::paintListBoxItem (int row, juce::Graphics& g, int width, int 
     g.setColour (textFaint);
     g.setFont (fonts::medium (11.0f));
     g.drawText (c.tag, content.withTrimmedBottom (3.0f), juce::Justification::topLeft, true);
+}
+
+int LibraryPanel::rowAt (const juce::MouseEvent& e)
+{
+    const auto p = e.getEventRelativeTo (&list).getPosition();
+    return list.getLocalBounds().contains (p) ? list.getRowContainingPosition (p.x, p.y) : -1;
+}
+
+void LibraryPanel::setHoveredRow (int row)
+{
+    if (row == hoveredRow)
+        return;
+    fadingRow = hoveredRow;
+    rowFadeOut.reset (hoveredRow >= 0);
+    rowFadeIn.reset (false);
+    hoveredRow = row;
+    list.repaint();
+}
+
+void LibraryPanel::mouseMove (const juce::MouseEvent& e)
+{
+    setHoveredRow (rowAt (e));
+}
+
+void LibraryPanel::mouseExit (const juce::MouseEvent& e)
+{
+    setHoveredRow (rowAt (e));
 }
 
 void LibraryPanel::listBoxItemClicked (int row, const juce::MouseEvent&)

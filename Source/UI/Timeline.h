@@ -46,7 +46,19 @@ public:
 
     static constexpr int rulerHeight = 30;
     static constexpr int scrollbarHeight = 12;
+
+    // Width of the track headers, dragged by the divider between the headers
+    // and the lanes (double-click: default). Reported on mouse up, to be saved.
+    static constexpr int defaultHeaderWidth = 184, minHeaderWidth = 150, maxHeaderWidth = 300;
     int getHeaderWidth() const noexcept { return headerWidth; }
+    void setHeaderWidth (int width);
+    std::function<void (int)> onHeaderWidthChanged;
+
+    // For the --selftest-edit tool: where a time falls in a lane, or in the
+    // ruler (its cycle band or its numbers), in this component's coordinates.
+    juce::Point<int> getLanePoint (Track track, double seconds) const;
+    juce::Point<int> getRulerPoint (double seconds, bool cycleBand) const;
+    double getPixelsPerSecond() const noexcept { return pixelsPerSecond; }
 
 private:
     class TrackHeader;
@@ -80,7 +92,7 @@ private:
 
     Session& session;
     Track selected = Track::amp;
-    int headerWidth = 184;
+    int headerWidth = defaultHeaderWidth, headerWidthAtDragStart = defaultHeaderWidth;
     int rowHeight = 80;
 
     double viewStart = 0.0, pixelsPerSecond = 40.0;
@@ -96,5 +108,6 @@ private:
     std::unique_ptr<Overlay> overlay;
     std::unique_ptr<CameraMonitor> monitor;
     juce::ScrollBar scrollbar { false };
+    roadie::ui::Splitter headerSplitter { roadie::ui::Splitter::Orientation::vertical };
     bool monitorPlaced = false;
 };

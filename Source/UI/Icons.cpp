@@ -47,6 +47,9 @@ Shape make (Icon icon)
         case Icon::check:       return { svg ({ "M5 12l5 5 9-10" }) };
         case Icon::close:       return { svg ({ "M6 6l12 12", "M18 6L6 18" }) };
         case Icon::waveform:    return { svg ({ "M3 12h2", "M7 8v8", "M11 4v16", "M15 7v10", "M19 10v4" }) };
+        case Icon::cycle:       return { svg ({ "M4 11V9a3 3 0 0 1 3-3h12", "M16 3l3 3-3 3", "M20 13v2a3 3 0 0 1-3 3H5", "M8 21l-3-3 3-3" }) };
+        case Icon::library:     p.addRoundedRectangle (3.0f, 4.0f, 18.0f, 16.0f, 2.5f); p.addPath (svg ({ "M9 4v16", "M5.5 8h1.5", "M5.5 11h1.5" })); return { p };
+        case Icon::inspector:   p.addRoundedRectangle (3.0f, 4.0f, 18.0f, 16.0f, 2.5f); p.addPath (svg ({ "M3 14h18", "M8 17h0.01", "M12 17h0.01", "M16 17h0.01" })); return { p };
     }
 
     return {};

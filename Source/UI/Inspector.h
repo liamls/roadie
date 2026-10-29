@@ -20,7 +20,8 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
 
-    static constexpr int preferredHeight = 118;
+    // Resizable by its top divider; the knobs grow with the height.
+    static constexpr int preferredHeight = 118, minHeight = 100, maxHeight = 200;
 
 private:
     class AmpPanel;

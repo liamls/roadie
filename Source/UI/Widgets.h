@@ -11,6 +11,64 @@
 // the main window keeps it so the looper shortcuts work at all times.
 namespace roadie::ui
 {
+// Hover fade (~120 ms), driven by paint(): a component owns one per hover
+// target and asks it for the current amount while painting. A shared timer
+// keeps repainting the owner until the fade settles, then goes quiet.
+class HoverFade
+{
+public:
+    explicit HoverFade (juce::Component& c) : owner (c) {}
+    ~HoverFade();
+
+    // Eased amount in [0, 1], heading for 1 while `hovered`.
+    float get (bool hovered);
+    // Jumps to the end (no fade), e.g. for a row that just appeared under the mouse.
+    void reset (bool hovered);
+
+    static constexpr double durationSeconds = 0.12;
+
+private:
+    friend class HoverAnimator;
+    juce::Component& owner;
+    float progress = 0.0f;
+    bool target = false;
+    double lastTime = 0.0;
+};
+
+// Draggable divider between two panels: a ↔ or ↕ cursor, an accent line
+// on hover and while dragging. Reports the drag distance from the press;
+// double-click restores the default size.
+class Splitter : public juce::Component,
+                 public juce::SettableTooltipClient
+{
+public:
+    enum class Orientation
+    {
+        vertical,  // between left and right panels, dragged horizontally
+        horizontal // between top and bottom panels, dragged vertically
+    };
+
+    explicit Splitter (Orientation orientation);
+
+    std::function<void()> onDragStart;
+    std::function<void (int deltaFromStart)> onDrag;
+    std::function<void()> onDragEnd;
+    std::function<void()> onDoubleClick;
+
+    static constexpr int thickness = 7; // hit area, centred on the panels' border
+
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void mouseDoubleClick (const juce::MouseEvent&) override;
+
+private:
+    Orientation orientation;
+    HoverFade fade { *this };
+    bool dragging = false;
+};
+
 // Round icon button: the transport cluster, toolbar actions.
 class IconButton : public juce::Button
 {
@@ -37,6 +95,7 @@ private:
     Style style;
     bool on = false, blinking = false;
     std::optional<juce::Colour> accent;
+    HoverFade fade { *this };
 };
 
 // Text button in the mockup's variants.
@@ -69,6 +128,7 @@ private:
     std::optional<icons::Icon> icon;
     bool fullyRounded = false;
     float fontSize = 13.0f;
+    HoverFade fade { *this };
 };
 
 // Ringed knob with its caption; shows the value while hovered or dragged.
@@ -113,8 +173,9 @@ private:
     float level = 0.0f, displayed = 0.0f;
 };
 
-// Rounded status pill: dot + label + strong value (CPU 23%, Latence 7.8 ms).
-class StatPill : public juce::Component
+// Rounded status pill: dot + label + strong value (CPU Faible, Latence 7.8 ms).
+class StatPill : public juce::Component,
+                 public juce::SettableTooltipClient
 {
 public:
     void setContent (const juce::String& label, const juce::String& value, juce::Colour dot);
@@ -136,6 +197,7 @@ public:
 private:
     bool solo;
     juce::Colour accent;
+    HoverFade fade { *this };
 };
 
 juce::String toUpperFrench (const juce::String& text);

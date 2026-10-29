@@ -1,8 +1,15 @@
-# Chantier en cours : montage façon GarageBand
+# Chantier : montage façon GarageBand
 
-Branche : `wip/montage-daw`. **Le build de l'app passe** (vérifié sur Linux,
-26/10). `main` reste sur le dernier état qui compile (1cf9387) en attendant
-que ce chantier soit fini.
+Branche : `wip/montage-daw`. **Tout le plan ci-dessous est fait** (29/10,
+sur Mac) : build sans avertissement dans le code Roadie, CTest, captures
+`--snapshot` en clair, en sombre et à plusieurs tailles d'interface, et les
+gestes d'édition vérifiés par `--selftest-edit` (vrais événements souris).
+`main` reste sur 1cf9387 jusqu'à l'essai réel ci-dessous, puis la branche
+pourra y être fusionnée.
+
+**Reste, à faire à la main avec une vraie prise filmée** : les vignettes
+dans les régions Caméra, l'aperçu LECTURE du moniteur, le menu contextuel
+des régions, et l'impression générale des survols.
 
 ## Demande d'origine
 
@@ -115,13 +122,35 @@ Vérifié : `Session`, `AudioEngine`, `Project`, `Looper`, `VideoPreview` et
    - **Pas encore vérifié à la main** : les gestes souris (déplacer,
      rogner, dupliquer, menu, cycle dessiné), les vignettes vidéo dans les
      régions et l'aperçu LECTURE avec une vraie prise filmée.
-3. **Raccourcis** dans `MainComponent` : déjà branchés ⌘T couper, ⌫ supprimer, ⌘D dupliquer, ⌘Z / ⇧⌘Z, C cycle, ← / → mesure, ⌘← / ⌘→ zoom. Reste : B inspecteur, Y bibliothèque, et le menu Édition.
-4. **Séparateurs déplaçables** (bibliothèque | timeline, largeur des en-têtes, hauteur de l'inspecteur), avec curseur double flèche, survol en accent et tailles sauvegardées dans les réglages.
-5. **Échelle d'interface** : menu Affichage > Taille de l'interface (80–125 %), via `Desktop::setGlobalScaleFactor` ; par défaut 90 % si l'écran fait 1440 pt ou moins.
-6. **TopBar** :
-   - CPU en libellé, avec une moyenne glissante (environ 2 s) et une hystérésis : moins de 35 % Faible, 35 à 70 % Normal, au-delà Élevé ; l'info-bulle donne le pourcentage exact ;
-   - boutons Cycle, Métronome, Bibliothèque et Inspecteur ;
-   - barre plus compacte.
-7. **Survol** : un animateur partagé (fondu d'environ 120 ms piloté par `paint`) pour les boutons, les LCD, les lignes de la bibliothèque, les en-têtes, les régions et les séparateurs ; léger enfoncement au clic.
-8. **Vérification** : build, CTest, snapshots `--snapshot` (prévoir une option `--demo` qui génère des prises de test pour voir des régions), essai réel à la caméra.
-9. **README** : sections montage, raccourcis et format v2.
+3. ~~**Raccourcis**~~ **Fait (29/10)** : B inspecteur, Y bibliothèque (repliés
+   ou non, mémorisé), menu **Édition** (Annuler / Rétablir avec le nom de
+   l'action, couper, dupliquer, supprimer, tout désélectionner, zone de
+   cycle) ; menu Affichage : Bibliothèque, Inspecteur, zoom avant / arrière,
+   tout le morceau à l'écran, Taille de l'interface, thème clair.
+4. ~~**Séparateurs déplaçables**~~ **Fait (29/10)** : `ui::Splitter` entre
+   bibliothèque et pistes (170–360 px), entre en-têtes et régions (150–300 px)
+   et au-dessus de l'inspecteur (100–200 px, les potards grandissent avec) ;
+   curseur ↔ / ↕, trait jaune au survol, double-clic = taille par défaut,
+   tailles mémorisées (`libraryWidth`, `trackHeaderWidth`, `inspectorHeight`).
+5. ~~**Échelle d'interface**~~ **Fait (29/10)** : Affichage > Taille de
+   l'interface 80 / 90 / 100 / 110 / 125 % (`uiScale`), appliquée à chaud ;
+   sans choix enregistré, 90 % si l'écran fait 1440 pt ou moins. La fenêtre
+   s'ouvre à ~92 % de l'écran (en coordonnées mises à l'échelle).
+6. ~~**TopBar**~~ **Fait (29/10)** : CPU en mot (`CpuLoad.h`, moyenne ~2 s,
+   seuils 35 / 70 % ± 3 %, testé dans `RoadieDspTests`, pourcentage dans
+   l'info-bulle) ; boutons Bibliothèque et Inspecteur à gauche, Cycle dans le
+   transport, Métronome après l'écran ; barre de 46 px au lieu de 54 ; sous
+   ~1120 px de large, plus de nom « Roadie » ni de libellé « Latence ».
+7. ~~**Survol**~~ **Fait (29/10)** : `ui::HoverFade` (fondu de 120 ms piloté
+   par `paint`, un seul minuteur partagé qui s'arrête quand tout est posé)
+   sur les boutons, les cases de l'écran (tempo, signature), les lignes de la
+   bibliothèque, les en-têtes de piste, les faders, M / S, le zoom, les
+   régions et les séparateurs ; les boutons s'enfoncent légèrement au clic.
+8. ~~**Vérification**~~ **Fait (29/10)** : build, CTest, snapshots, et
+   `--selftest-edit` : 19 vérifications (déplacer, rogner les deux bords,
+   dupliquer à ⌥, déplacer la boucle, dessiner un cycle, tête de lecture dans
+   la règle, ⌘Z ×4 puis ⇧⌘Z, les trois séparateurs, Y / B). Les outils de
+   vérification remettent `Roadie.settings` comme ils l'ont trouvé.
+   Pas fait : l'essai réel à la caméra (voir en haut).
+9. ~~**README**~~ **Fait (29/10)** : jalon 7, outils, architecture, format v2,
+   utilisation et raccourcis du montage.

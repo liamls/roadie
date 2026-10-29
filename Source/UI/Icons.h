@@ -28,7 +28,10 @@ enum class Icon
     folder,
     check,
     close,
-    waveform
+    waveform,
+    cycle,     // the cycle zone (two arrows around a rectangle), not the looper
+    library,   // sidebar on the left
+    inspector  // panel at the bottom
 };
 
 void draw (juce::Graphics& g, Icon icon, juce::Rectangle<float> area, juce::Colour colour, float strokeWidth = 2.0f);

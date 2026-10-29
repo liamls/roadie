@@ -66,14 +66,19 @@ std::vector<float> resample (const std::vector<float>& input, double fromRate, d
 }
 } // namespace
 
-Session::Session()
+juce::PropertiesFile::Options Session::getSettingsOptions()
 {
     juce::PropertiesFile::Options options;
     options.applicationName = "Roadie";
     options.filenameSuffix = ".settings";
     options.folderName = "Roadie";
     options.osxLibrarySubFolder = "Application Support";
-    settings.setStorageParameters (options);
+    return options;
+}
+
+Session::Session()
+{
+    settings.setStorageParameters (getSettingsOptions());
 
     auto& s = getSettings();
 

@@ -110,7 +110,8 @@ public:
         headArea = area.removeFromLeft (std::min (190, area.getWidth() / 5));
         area.removeFromLeft (8);
 
-        const int knobSize = 52, gap = 16;
+        // Knobs follow the inspector's height (52 px at the default size).
+        const int knobSize = juce::jlimit (40, 84, area.getHeight() - 36), gap = 16;
         const int count = (int) knobs.size();
         const int bankWidth = count * (knobSize + 8) + (count - 1) * (gap - 8);
 

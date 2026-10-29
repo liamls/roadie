@@ -1,5 +1,5 @@
-// Tests for the JUCE-free DSP helpers: tone stack, metronome and sync onset
-// detection. Build and run (no JUCE needed):
+// Tests for the JUCE-free DSP helpers: tone stack, metronome, sync onset
+// detection and the CPU load word. Build and run (no JUCE needed):
 //   clang++ -std=c++20 -O2 -ISource Tests/DspTests.cpp Source/ToneStack.cpp \
 //     Source/SyncAnalysis.cpp Source/Metronome.cpp -o /tmp/dsp_tests && /tmp/dsp_tests
 
@@ -9,6 +9,7 @@
 #include <random>
 #include <vector>
 
+#include "CpuLoad.h"
 #include "Metronome.h"
 #include "SyncAnalysis.h"
 #include "ToneStack.h"
@@ -120,11 +121,48 @@ static void testMetronome()
         assert (s == 0.0f);
 }
 
+static void testCpuLoad()
+{
+    constexpr double frame = 1.0 / 30.0; // the UI timer
+    auto run = [] (CpuLoad& meter, double load, double seconds)
+    {
+        for (double t = 0.0; t < seconds; t += frame)
+            meter.push (load, frame);
+    };
+
+    CpuLoad meter;
+    run (meter, 0.20, 3.0);
+    assert (meter.getLevel() == CpuLoad::Level::low);
+
+    // A single spike doesn't change the word: it is averaged over ~2 s.
+    meter.push (1.0, frame);
+    assert (meter.getLevel() == CpuLoad::Level::low);
+
+    // A real change does, within a few seconds.
+    run (meter, 0.50, 1.0);
+    printf ("cpu 20 %% -> 50 %%: average %.2f after 1 s\n", meter.getAverage());
+    assert (meter.getLevel() == CpuLoad::Level::low);
+    run (meter, 0.50, 4.0);
+    assert (meter.getLevel() == CpuLoad::Level::normal);
+    run (meter, 0.90, 6.0);
+    assert (meter.getLevel() == CpuLoad::Level::high);
+
+    // Hysteresis: just under a threshold keeps the current word.
+    assert (CpuLoad::classify (0.36, CpuLoad::Level::normal) == CpuLoad::Level::normal);
+    assert (CpuLoad::classify (0.36, CpuLoad::Level::low) == CpuLoad::Level::low);
+    assert (CpuLoad::classify (0.68, CpuLoad::Level::high) == CpuLoad::Level::high);
+    assert (CpuLoad::classify (0.68, CpuLoad::Level::normal) == CpuLoad::Level::normal);
+    assert (CpuLoad::classify (0.30, CpuLoad::Level::normal) == CpuLoad::Level::low);
+    assert (CpuLoad::classify (0.75, CpuLoad::Level::normal) == CpuLoad::Level::high);
+    assert (CpuLoad::classify (0.10, CpuLoad::Level::high) == CpuLoad::Level::low);
+}
+
 int main()
 {
     testToneStack();
     testSync();
     testMetronome();
+    testCpuLoad();
     printf ("ALL DSP TESTS PASSED\n");
     return 0;
 }

@@ -17,6 +17,9 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
     void lookAndFeelChanged() override;
+    // Also receives the list's mouse events, for the row hover.
+    void mouseMove (const juce::MouseEvent&) override;
+    void mouseExit (const juce::MouseEvent&) override;
 
 private:
     int getNumRows() override;
@@ -31,6 +34,11 @@ private:
     Session& session;
     juce::TextEditor search;
     juce::ListBox list { "Captures", this };
+    // The row under the mouse fades in, the one it left fades out.
+    int hoveredRow = -1, fadingRow = -1;
+    roadie::ui::HoverFade rowFadeIn { list }, rowFadeOut { list };
+    int rowAt (const juce::MouseEvent&);
+    void setHoveredRow (int row);
     roadie::ui::IconButton addFolderButton { "Add folder", roadie::icons::Icon::plus, roadie::ui::IconButton::Style::square };
     roadie::ui::PillButton openFileButton;
     std::vector<CaptureInfo> visible;

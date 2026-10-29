@@ -9,7 +9,159 @@ void noFocus (juce::Component& c)
     c.setWantsKeyboardFocus (false);
     c.setMouseClickGrabsKeyboardFocus (false);
 }
+
+double nowSeconds() { return juce::Time::getMillisecondCounterHiRes() * 0.001; }
+
+// Pressed controls sink a little (scaled down around their centre).
+void pressIn (juce::Graphics& g, juce::Rectangle<float> bounds, bool isDown)
+{
+    if (isDown)
+        g.addTransform (juce::AffineTransform::scale (0.95f, 0.95f, bounds.getCentreX(), bounds.getCentreY()));
+}
 } // namespace
+
+//==============================================================================
+// Repaints the components whose hover fade is still moving, at 60 Hz, and
+// stops as soon as every fade has settled.
+class HoverAnimator : public juce::DeletedAtShutdown,
+                      private juce::Timer
+{
+public:
+    ~HoverAnimator() override { clearSingletonInstance(); }
+
+    void add (HoverFade* fade)
+    {
+        active.addIfNotAlreadyThere (fade);
+        if (! isTimerRunning())
+            startTimerHz (60);
+    }
+
+    void remove (HoverFade* fade)
+    {
+        active.removeAllInstancesOf (fade);
+        if (active.isEmpty())
+            stopTimer();
+    }
+
+    JUCE_DECLARE_SINGLETON_SINGLETHREADED_MINIMAL_INLINE (HoverAnimator)
+
+private:
+    void timerCallback() override
+    {
+        const double now = nowSeconds();
+        for (int i = active.size(); --i >= 0;)
+        {
+            auto* fade = active.getUnchecked (i);
+            // Not painted for a while (hidden, off screen): settle it silently.
+            if (now - fade->lastTime > 0.3)
+            {
+                fade->progress = fade->target ? 1.0f : 0.0f;
+                active.remove (i);
+                continue;
+            }
+            fade->owner.repaint();
+        }
+
+        if (active.isEmpty())
+            stopTimer();
+    }
+
+    juce::Array<HoverFade*> active;
+};
+
+HoverFade::~HoverFade()
+{
+    if (auto* animator = HoverAnimator::getInstanceWithoutCreating())
+        animator->remove (this);
+}
+
+float HoverFade::get (bool hovered)
+{
+    const double now = nowSeconds();
+    if (hovered != target)
+    {
+        target = hovered;
+        lastTime = now - 1.0 / 60.0; // the first frame already moves
+    }
+
+    const float goal = target ? 1.0f : 0.0f;
+    if (! juce::exactlyEqual (progress, goal))
+    {
+        const auto step = (float) ((now - lastTime) / durationSeconds);
+        progress = target ? std::min (1.0f, progress + step) : std::max (0.0f, progress - step);
+
+        if (juce::exactlyEqual (progress, goal))
+            HoverAnimator::getInstance()->remove (this);
+        else
+            HoverAnimator::getInstance()->add (this);
+    }
+    lastTime = now;
+
+    // Smoothstep: soft at both ends.
+    return progress * progress * (3.0f - 2.0f * progress);
+}
+
+void HoverFade::reset (bool hovered)
+{
+    target = hovered;
+    progress = hovered ? 1.0f : 0.0f;
+    lastTime = nowSeconds();
+    if (auto* animator = HoverAnimator::getInstanceWithoutCreating())
+        animator->remove (this);
+}
+
+//==============================================================================
+Splitter::Splitter (Orientation o) : orientation (o)
+{
+    noFocus (*this);
+    setRepaintsOnMouseActivity (true);
+    setMouseCursor (orientation == Orientation::vertical ? juce::MouseCursor::LeftRightResizeCursor
+                                                         : juce::MouseCursor::UpDownResizeCursor);
+    setTooltip (juce::String::fromUTF8 ("Glisse pour redimensionner \xc2\xb7 double-clic : taille par d\xc3\xa9" "faut"));
+}
+
+void Splitter::paint (juce::Graphics& g)
+{
+    // Only the hover line: the panels draw their own border underneath.
+    const float amount = fade.get (dragging || isMouseOver());
+    if (amount <= 0.0f)
+        return;
+
+    auto bounds = getLocalBounds().toFloat();
+    const float width = 1.0f + amount;
+    const auto line = orientation == Orientation::vertical ? bounds.withSizeKeepingCentre (width, bounds.getHeight())
+                                                           : bounds.withSizeKeepingCentre (bounds.getWidth(), width);
+    g.setColour (theme::exportAccent.withAlpha (0.85f * amount));
+    g.fillRect (line);
+}
+
+void Splitter::mouseDown (const juce::MouseEvent&)
+{
+    dragging = true;
+    if (onDragStart)
+        onDragStart();
+    repaint();
+}
+
+void Splitter::mouseDrag (const juce::MouseEvent& e)
+{
+    if (onDrag)
+        onDrag (orientation == Orientation::vertical ? e.getDistanceFromDragStartX() : e.getDistanceFromDragStartY());
+}
+
+void Splitter::mouseUp (const juce::MouseEvent&)
+{
+    dragging = false;
+    if (onDragEnd)
+        onDragEnd();
+    repaint();
+}
+
+void Splitter::mouseDoubleClick (const juce::MouseEvent&)
+{
+    if (onDoubleClick)
+        onDoubleClick();
+}
 
 //==============================================================================
 IconButton::IconButton (const juce::String& name, icons::Icon i, Style s)
@@ -24,6 +176,8 @@ void IconButton::paintButton (juce::Graphics& g, bool isOver, bool isDown)
     using namespace theme;
     auto bounds = getLocalBounds().toFloat();
     const bool lit = on || getToggleState();
+    const float hover = fade.get (isOver && isEnabled());
+    pressIn (g, bounds, isDown);
 
     juce::Colour iconColour = textMuted;
     juce::Colour fill = juce::Colours::transparentBlack;
@@ -31,25 +185,24 @@ void IconButton::paintButton (juce::Graphics& g, bool isOver, bool isDown)
     if (style == Style::record)
     {
         iconColour = rec;
-        if (isOver || lit)
-            fill = rec.withAlpha (lit ? 0.22f : 0.12f);
+        fill = rec.withAlpha (lit ? 0.22f : 0.12f * hover);
     }
     else
     {
         if (lit)
         {
             iconColour = accent.value_or (theme::text);
-            fill = accent.has_value() ? accent->withAlpha (0.16f) : theme::text.withAlpha (0.08f);
+            fill = accent.has_value() ? accent->withAlpha (0.16f + 0.06f * hover) : theme::text.withAlpha (0.08f + 0.03f * hover);
         }
-        else if (isOver)
+        else
         {
-            iconColour = theme::text;
-            fill = theme::text.withAlpha (0.04f);
+            iconColour = textMuted.interpolatedWith (theme::text, hover);
+            fill = theme::text.withAlpha (0.06f * hover);
         }
     }
 
     if (isDown)
-        fill = fill.isTransparent() ? theme::text.withAlpha (0.08f) : fill.brighter (0.1f);
+        fill = fill.getAlpha() < 20 ? theme::text.withAlpha (0.1f) : fill.brighter (0.1f);
 
     if (blinking && (juce::Time::getMillisecondCounter() / 700) % 2 == 1)
         iconColour = iconColour.withMultipliedAlpha (0.35f);
@@ -94,6 +247,8 @@ void PillButton::paintButton (juce::Graphics& g, bool isOver, bool isDown)
     auto bounds = getLocalBounds().toFloat().reduced (0.5f);
     const float radius = fullyRounded ? bounds.getHeight() * 0.5f : radiusMd;
     const bool lit = getToggleState();
+    const float hover = fade.get (isOver && isEnabled());
+    pressIn (g, bounds, isDown);
 
     juce::Colour fill, outline, label, iconColour;
     switch (variant)
@@ -121,8 +276,10 @@ void PillButton::paintButton (juce::Graphics& g, bool isOver, bool isDown)
 
     if (isDown)
         fill = fill.darker (0.15f);
-    else if (isOver)
-        fill = variant == Variant::solid ? fill.brighter (0.08f) : fill.overlaidWith (theme::text.withAlpha (0.04f));
+    else if (hover > 0.0f)
+        fill = variant == Variant::solid ? fill.brighter (0.08f * hover) : fill.overlaidWith (theme::text.withAlpha (0.05f * hover));
+    if (variant == Variant::neutral && ! lit)
+        outline = outline.interpolatedWith (textFaint, 0.6f * hover);
 
     const float alpha = isEnabled() ? 1.0f : 0.35f;
     g.setColour (fill.withMultipliedAlpha (alpha));
@@ -265,7 +422,7 @@ void StatPill::setContent (const juce::String& newLabel, const juce::String& new
 int StatPill::getIdealWidth() const
 {
     return (int) std::ceil (10.0f + 6.0f + 6.0f
-                            + juce::GlyphArrangement::getStringWidth (fonts::medium (12.0f), label + " ")
+                            + (label.isEmpty() ? 0.0f : juce::GlyphArrangement::getStringWidth (fonts::medium (12.0f), label + " "))
                             + fonts::getTabularWidth (fonts::semibold (12.0f), value) + 12.0f);
 }
 
@@ -286,7 +443,7 @@ void StatPill::paint (juce::Graphics& g)
     const auto labelFont = fonts::medium (12.0f);
     g.setFont (labelFont);
     g.setColour (textMuted);
-    const float labelWidth = juce::GlyphArrangement::getStringWidth (labelFont, label + " ");
+    const float labelWidth = label.isEmpty() ? 0.0f : juce::GlyphArrangement::getStringWidth (labelFont, label + " ");
     g.drawText (label, inner.removeFromLeft (labelWidth), juce::Justification::centredLeft, false);
 
     g.setFont (fonts::semibold (12.0f));
@@ -304,18 +461,20 @@ MuteSoloButton::MuteSoloButton (bool isSolo, juce::Colour a)
                        : juce::String::fromUTF8 ("Muet : couper cette piste au monitoring"));
 }
 
-void MuteSoloButton::paintButton (juce::Graphics& g, bool isOver, bool)
+void MuteSoloButton::paintButton (juce::Graphics& g, bool isOver, bool isDown)
 {
     using namespace theme;
     auto bounds = getLocalBounds().toFloat().reduced (0.5f);
     const bool lit = getToggleState();
     const auto litColour = solo ? accent : warn;
+    const float hover = fade.get (isOver);
+    pressIn (g, bounds, isDown);
 
-    g.setColour (lit ? litColour.withAlpha (0.22f) : surfaceSunken);
+    g.setColour (lit ? litColour.withAlpha (0.22f + 0.08f * hover) : surfaceSunken.interpolatedWith (surfaceRaised, hover));
     g.fillRoundedRectangle (bounds, 3.0f);
-    g.setColour (lit ? litColour : (isOver ? textMuted : border));
+    g.setColour (lit ? litColour : border.interpolatedWith (textMuted, hover));
     g.drawRoundedRectangle (bounds, 3.0f, 1.0f);
-    g.setColour (lit ? litColour : textFaint);
+    g.setColour (lit ? litColour : textFaint.interpolatedWith (textMuted, hover));
     g.setFont (fonts::display (8.5f));
     g.drawText (getButtonText(), bounds, juce::Justification::centred, false);
 }

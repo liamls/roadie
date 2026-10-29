@@ -204,6 +204,8 @@ public:
     void notify (const juce::String& message);
 
     juce::PropertiesFile& getSettings() { return *settings.getUserSettings(); }
+    // ~/Library/Application Support/Roadie/Roadie.settings on macOS.
+    static juce::PropertiesFile::Options getSettingsOptions();
 
 private:
     void timerCallback() override;
