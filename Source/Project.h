@@ -8,6 +8,7 @@
 //
 //   project.json     settings (tempo, ampli, caméra), takes, arrangement
 //   loop.wav         the looper content, 24-bit mono
+//   song/            the backing track, copied as imported (MP3, M4A, WAV…)
 //   takes/           take-N.wav (the mix), take-N.mov (camera), take-N/ thumbnails
 //   exports/         rendered clips
 //
@@ -19,8 +20,10 @@
 struct Take
 {
     juce::String name;
+    bool hidden = false; // kept in the project, but out of the Prises list
     juce::File audioFile;
     juce::File videoFile;
+    juce::File dryFile; // the guitar before the amp (takes recorded since re-amping exists): lets the amp change after the fact
 
     // Host-clock (mach_absolute_time) capture times of the first audio sample
     // and the first video frame — only meaningful relative to each other.
@@ -61,8 +64,31 @@ struct Clip
     }
 };
 
+// A part of the backing track (Intro, A, B…), in the song file's time.
+struct SongSection
+{
+    double start = 0.0, end = 0.0;
+    juce::String label;
+};
+
+// The backing track: a file in the project's song/ folder, its tempo and
+// where its first bar starts (detected, then corrected by the player).
+struct Song
+{
+    juce::File file;
+    juce::String title;
+    double bpm = 0.0, detectedBpm = 0.0;
+    double firstDownbeat = 0.0; // seconds into the file
+    double duration = 0.0;
+    std::vector<SongSection> sections;
+    double speed = 1.0; // practice: 0.5 … 1.0
+    int semitones = 0;  // transposition, −6 … +6
+
+    bool isSet() const { return file != juce::File(); }
+};
+
 // What the timeline edits (and what ⌘Z undoes): the regions of the Guitare
-// track and the Looper region. Where regions overlap, the later one in the
+// track, the Looper region and where the song sits. Where regions overlap, the later one in the
 // list plays (and shows its video), like a punch-in over an older take.
 struct Arrangement
 {
@@ -75,6 +101,10 @@ struct Arrangement
     double loopStart = 0.0;
     double loopEnd = -1.0;
 
+    // Timeline position of the song's first sample (negative: it starts
+    // before the timeline, its first bar on bar 2).
+    double songStart = 0.0;
+
     bool isLoopOpenEnded() const { return loopEnd < 0.0; }
     // End of the last region, or of the bounded loop region.
     double getContentEnd (bool hasLoop) const;
@@ -82,7 +112,7 @@ struct Arrangement
     bool operator== (const Arrangement& o) const
     {
         return clips == o.clips && juce::exactlyEqual (loopAnchor, o.loopAnchor) && juce::exactlyEqual (loopStart, o.loopStart)
-               && juce::exactlyEqual (loopEnd, o.loopEnd);
+               && juce::exactlyEqual (loopEnd, o.loopEnd) && juce::exactlyEqual (songStart, o.songStart);
     }
     bool operator!= (const Arrangement& o) const { return ! (*this == o); }
 };
@@ -99,9 +129,14 @@ struct Project
     juce::File captureFile;
     juce::File irFile;
     float gainDb = 0.0f, bassDb = 0.0f, midDb = 0.0f, trebleDb = 0.0f, presenceDb = 0.0f, volumeDb = 0.0f;
+    bool gateOn = false;
+    float gateThresholdDb = -60.0f;
+    bool bypassCapture = false, bypassEq = false, bypassCab = false;
+    float masterVolumeDb = 0.0f;
 
     juce::String cameraDevice;
     int loopLayers = 0;
+    bool looperTrack = false; // the Looper track is only there once added (or once a loop exists)
 
     std::vector<Take> takes;
     Arrangement arrangement;
@@ -110,7 +145,9 @@ struct Project
     // part of the undo history.
     bool cycleOn = false;
     double cycleStart = 0.0, cycleEnd = 0.0;
-    float guitarVolumeDb = 0.0f, loopVolumeDb = 0.0f;
+    float guitarVolumeDb = 0.0f, loopVolumeDb = 0.0f, songVolumeDb = -3.0f;
+
+    Song song;
 
     static constexpr const char* extension = ".roadie";
 
@@ -118,6 +155,7 @@ struct Project
     juce::File getLoopFile() const { return folder.getChildFile ("loop.wav"); }
     juce::File getTakesFolder() const { return folder.getChildFile ("takes"); }
     juce::File getExportsFolder() const { return folder.getChildFile ("exports"); }
+    juce::File getSongFolder() const { return folder.getChildFile ("song"); }
 
     // Next free take number, then "Prise 3" and take-3.wav / take-3.mov.
     // Compute the number once per take: the files it names count as taken

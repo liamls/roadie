@@ -24,6 +24,7 @@ AudioEngine::AudioEngine() = default;
 AudioEngine::~AudioEngine()
 {
     takeRecorder.stop();
+    dryRecorder.stop();
 }
 
 //==============================================================================
@@ -37,8 +38,24 @@ void AudioEngine::locate (std::int64_t position) noexcept
     locateRequest.store (std::max<std::int64_t> (0, position), std::memory_order_relaxed);
 }
 
+void AudioEngine::scheduleLoopRecord (std::int64_t startAt, std::int64_t endAt)
+{
+    loopEndAt.store (endAt, std::memory_order_relaxed);
+    loopStartAt.store (startAt, std::memory_order_release);
+}
+
+void AudioEngine::cancelLoopSchedule() noexcept
+{
+    loopStartAt.store (noLocate, std::memory_order_relaxed);
+    loopEndAt.store (noLocate, std::memory_order_relaxed);
+    metronome.setCountInEnd (-1);
+}
+
 void AudioEngine::recordLoop()
 {
+    // Closing a loop by hand cancels the bar count it was waiting for.
+    if (looper.getState() == Looper::State::Recording)
+        loopEndAt.store (noLocate, std::memory_order_relaxed);
     // One button cycles like a loop pedal: record → play → overdub → play…
     // A pedal never waits for a play button: it starts the transport.
     play();
@@ -58,6 +75,7 @@ void AudioEngine::recordLoop()
 
 void AudioEngine::stopAll()
 {
+    cancelLoopSchedule();
     const auto state = looper.getState();
     if (state == Looper::State::Recording)
         looper.requestRecord(); // keep what was played rather than throwing it away
@@ -81,6 +99,14 @@ void AudioEngine::setPlaybackClips (std::shared_ptr<const PlaybackList> clips)
     hasPendingClips = true;
 }
 
+void AudioEngine::setSong (std::shared_ptr<const SongAudio> audio)
+{
+    const juce::SpinLock::ScopedLockType sl (playbackLock);
+    retiredSong.reset(); // the audio thread is done with it (it only retires under this lock)
+    pendingSong = std::move (audio);
+    hasPendingSong = true;
+}
+
 void AudioEngine::setLoopPlacement (std::int64_t anchor, std::int64_t regionStart, std::int64_t regionEnd) noexcept
 {
     loopAnchor.store (anchor, std::memory_order_relaxed);
@@ -89,16 +115,40 @@ void AudioEngine::setLoopPlacement (std::int64_t anchor, std::int64_t regionStar
 }
 
 //==============================================================================
-bool AudioEngine::startTake (const juce::File& wavFile)
+void AudioEngine::copyRecentInput (float* destination, int numSamples) const noexcept
 {
-    takeStartPos.store (getTransportPosition(), std::memory_order_release);
+    numSamples = std::min (numSamples, recentInputCapacity);
+    const int end = recentInputWrite.load (std::memory_order_acquire);
+    for (int i = 0; i < numSamples; ++i)
+        destination[i] = recentInput[(size_t) ((end - numSamples + i) & (recentInputCapacity - 1))].load (std::memory_order_relaxed);
+}
+
+void AudioEngine::setLatencyAdjustmentSamples (int samples) noexcept
+{
+    latencyAdjustment.store (samples, std::memory_order_relaxed);
+    const int total = std::max (0, deviceRoundTrip.load (std::memory_order_relaxed) + samples);
+    recordLatency.store (total, std::memory_order_relaxed);
+    looper.setRecordDelay (total);
+}
+
+bool AudioEngine::startTake (const juce::File& wavFile, std::int64_t locateTo, const juce::File& dryWavFile)
+{
+    takeStartPos.store ((locateTo != noLocate ? locateTo : getTransportPosition()) - getRecordLatencySamples(), std::memory_order_release);
+    takeLocate.store (locateTo, std::memory_order_release);
+    if (! takeRecorder.start (wavFile, getSampleRate()))
+        return false;
+    if (dryWavFile != juce::File())
+        dryRecorder.start (dryWavFile, getSampleRate()); // best effort: without it, the take just can't be re-amped
+    // Last: the audio thread starts the take (and its locate) at a block
+    // boundary once it sees this.
     takeStartPending.store (true, std::memory_order_release);
-    return takeRecorder.start (wavFile, getSampleRate());
+    return true;
 }
 
 void AudioEngine::stopTake()
 {
     takeRecorder.stop();
+    dryRecorder.stop();
 }
 
 //==============================================================================
@@ -155,6 +205,8 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     loopBuffer.assign (capacity, 0.0f);
     clipBuffer.assign (capacity, 0.0f);
     mixBuffer.assign (capacity, 0.0f);
+    leftBuffer.assign (capacity, 0.0f);
+    rightBuffer.assign (capacity, 0.0f);
     coveredBuffer.assign (capacity, 0);
     historySlotSamples.store (std::max (1, (int) std::round (sr / 100.0)), std::memory_order_relaxed);
 
@@ -162,8 +214,11 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     calibrationTarget.store (0, std::memory_order_relaxed);
     calibrationWritten.store (0, std::memory_order_relaxed);
 
-    const double rt = (bs + device->getInputLatencyInSamples() + device->getOutputLatencyInSamples()) / sr * 1000.0;
+    const int roundTrip = device->getInputLatencyInSamples() + device->getOutputLatencyInSamples();
+    const double rt = roundTrip / sr * 1000.0;
     roundTripMs.store (rt, std::memory_order_relaxed);
+    deviceRoundTrip.store (roundTrip, std::memory_order_relaxed);
+    setLatencyAdjustmentSamples (latencyAdjustment.load (std::memory_order_relaxed));
 
     std::cerr << "[Roadie] device=" << device->getName()
               << " sampleRate=" << sr
@@ -208,13 +263,41 @@ void AudioEngine::updateTransport() noexcept
 void AudioEngine::pickUpPlaybackClips() noexcept
 {
     const juce::SpinLock::ScopedTryLockType sl (playbackLock);
-    if (! sl.isLocked() || ! hasPendingClips || retiredClips != nullptr)
+    if (! sl.isLocked())
         return;
 
-    // Moves only: the old list is released later by the message thread.
-    retiredClips = std::move (activeClips);
-    activeClips = std::move (pendingClips);
-    hasPendingClips = false;
+    // Moves only: the old list (or song) is released later by the message thread.
+    if (hasPendingClips && retiredClips == nullptr)
+    {
+        retiredClips = std::move (activeClips);
+        activeClips = std::move (pendingClips);
+        hasPendingClips = false;
+    }
+    if (hasPendingSong && retiredSong == nullptr)
+    {
+        retiredSong = std::move (activeSong);
+        activeSong = std::move (pendingSong);
+        hasPendingSong = false;
+    }
+}
+
+void AudioEngine::renderSong (std::int64_t pos, int numSamples, float* left, float* right, float& peak) noexcept
+{
+    if (activeSong == nullptr || songMuted.load (std::memory_order_relaxed))
+        return;
+
+    const auto& song = *activeSong;
+    const float gain = songGain.load (std::memory_order_relaxed);
+    const auto offset = pos - songStart.load (std::memory_order_relaxed);
+    const auto length = (std::int64_t) std::min (song.left.size(), song.right.size());
+    const auto from = std::max<std::int64_t> (0, -offset), to = std::min<std::int64_t> (numSamples, length - offset);
+    for (auto i = from; i < to; ++i)
+    {
+        const float l = song.left[(size_t) (offset + i)] * gain, r = song.right[(size_t) (offset + i)] * gain;
+        left[i] += l;
+        right[i] += r;
+        peak = std::max ({ peak, std::abs (l), std::abs (r) });
+    }
 }
 
 int AudioEngine::chunkLength (std::int64_t pos, int wanted, bool cycleActive) const noexcept
@@ -230,6 +313,8 @@ int AudioEngine::chunkLength (std::int64_t pos, int wanted, bool cycleActive) co
 
     if (cycleActive)
         clampTo (cycleEnd.load (std::memory_order_relaxed));
+    clampTo (loopStartAt.load (std::memory_order_relaxed));
+    clampTo (loopEndAt.load (std::memory_order_relaxed));
     clampTo (loopRegionStart.load (std::memory_order_relaxed));
     clampTo (loopRegionEnd.load (std::memory_order_relaxed));
     return (int) (limit - pos);
@@ -292,10 +377,12 @@ void AudioEngine::renderLoop (const float* live, float* loopOut, std::int64_t po
         juce::FloatVectorOperations::clear (loopOut, numSamples);
     }
 
-    // A new loop: its first sample is here, it plays from here on.
+    // A new loop: its first sample is here — where the player heard the
+    // arrangement, a round trip ago — and it plays from there on.
     if (before != Looper::State::Recording && looper.getState() == Looper::State::Recording)
     {
-        setLoopPlacement (pos, pos, -1);
+        const auto anchor = pos - recordLatency.load (std::memory_order_relaxed);
+        setLoopPlacement (anchor, std::max<std::int64_t> (0, anchor), -1);
         loopRecordCount.fetch_add (1, std::memory_order_relaxed);
     }
 }
@@ -305,6 +392,8 @@ void AudioEngine::writeHistory (const float* live, std::int64_t pos, int numSamp
     const int slotSamples = historySlotSamples.load (std::memory_order_relaxed);
     for (int i = 0; i < numSamples; ++i)
     {
+        if (pos + i < 0)
+            continue;
         const auto slot = (pos + i) / slotSamples;
         if (slot != historySlot)
         {
@@ -340,11 +429,27 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     updateTransport();
     pickUpPlaybackClips();
 
+    // A take starts on a block boundary, with its locate if it has one, so
+    // its first sample and its place on the timeline always match.
+    if (takeStartPending.exchange (false, std::memory_order_acq_rel))
+    {
+        if (const auto to = takeLocate.exchange (noLocate, std::memory_order_acq_rel); to != noLocate)
+        {
+            transportPos.store (to, std::memory_order_relaxed);
+            historySlot = -1;
+        }
+        takeStartPos.store (transportPos.load (std::memory_order_relaxed) - recordLatency.load (std::memory_order_relaxed), std::memory_order_release);
+        takeRolling = true;
+    }
+
     const bool running = transportRunning.load (std::memory_order_relaxed);
     const bool recordingTake = takeRecorder.isRecording();
+    if (! recordingTake)
+        takeRolling = false;
     const bool cycleActive = cycleEnabled.load (std::memory_order_relaxed) && ! recordingTake;
 
-    float blockInputPeak = 0.0f, blockOutputPeak = 0.0f, blockGuitarPeak = 0.0f, blockLoopPeak = 0.0f;
+    float blockInputPeak = 0.0f, blockOutputPeak = 0.0f, blockGuitarPeak = 0.0f, blockLoopPeak = 0.0f, blockSongPeak = 0.0f;
+    float blockLeftPeak = 0.0f, blockRightPeak = 0.0f;
     const int capacity = (int) liveBuffer.size();
 
     for (int offset = 0; offset < numSamples;)
@@ -360,10 +465,31 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         if (running)
             n = chunkLength (pos, n, cycleActive);
 
+        // A scheduled loop starts (and ends) exactly on its sample: the chunk
+        // was cut there, so the request lands on the chunk's first sample.
+        if (running)
+        {
+            if (const auto startAt = loopStartAt.load (std::memory_order_relaxed); startAt != noLocate && pos >= startAt)
+            {
+                loopStartAt.store (noLocate, std::memory_order_relaxed);
+                metronome.setCountInEnd (-1);
+                if (looper.getState() == Looper::State::Empty)
+                    looper.requestRecord();
+            }
+            if (const auto endAt = loopEndAt.load (std::memory_order_relaxed); endAt != noLocate && pos >= endAt)
+            {
+                loopEndAt.store (noLocate, std::memory_order_relaxed);
+                if (looper.getState() == Looper::State::Recording)
+                    looper.requestRecord();
+            }
+        }
+
         float* live = liveBuffer.data();
         float* loop = loopBuffer.data();
         float* clips = clipBuffer.data();
         float* mix = mixBuffer.data();
+        float* left = leftBuffer.data();
+        float* right = rightBuffer.data();
 
         if (rawInput != nullptr)
             juce::FloatVectorOperations::copy (live, rawInput + offset, n);
@@ -371,6 +497,14 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             juce::FloatVectorOperations::clear (live, n);
 
         blockInputPeak = std::max (blockInputPeak, peakOf (live, n));
+
+        // Kept for the tuner (dry, before the amp).
+        {
+            const int write = recentInputWrite.load (std::memory_order_relaxed);
+            for (int i = 0; i < n; ++i)
+                recentInput[(size_t) ((write + i) & (recentInputCapacity - 1))].store (live[i], std::memory_order_relaxed);
+            recentInputWrite.store ((write + n) & (recentInputCapacity - 1), std::memory_order_release);
+        }
 
         // Calibration listens to the raw input: the amp adds no latency, and
         // a dry clap/strum transient is sharper than an amped one.
@@ -385,6 +519,11 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             calibrationWritten.store (written + toCopy, std::memory_order_release);
         }
 
+        // Both recorders start on the same block, so the dry file lines up
+        // sample for sample with the amped one.
+        if (takeRolling)
+            dryRecorder.push (live, n, blockHostSeconds + offset / sr);
+
         amp.process (live, n);
         renderLoop (live, loop, pos, n, running);
 
@@ -393,9 +532,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         else
             juce::FloatVectorOperations::clear (clips, n);
 
-        if (takeStartPending.exchange (false, std::memory_order_acq_rel))
-            takeStartPos.store (pos, std::memory_order_release);
-        takeRecorder.push (live, n, blockHostSeconds + offset / sr);
+        if (takeRolling)
+            takeRecorder.push (live, n, blockHostSeconds + offset / sr);
 
         for (int i = 0; i < n; ++i)
         {
@@ -407,17 +545,42 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         }
 
         if (running)
-            writeHistory (live, pos, n);
+            writeHistory (live, pos - recordLatency.load (std::memory_order_relaxed), n);
 
-        blockOutputPeak = std::max (blockOutputPeak, peakOf (mix, n));
         metronome.process (mix, n, pos, running);
+
+        // The mono centre goes to both sides; the song brings its own stereo.
+        juce::FloatVectorOperations::copy (left, mix, n);
+        juce::FloatVectorOperations::copy (right, mix, n);
+        if (running)
+            renderSong (pos, n, left, right, blockSongPeak);
+        const float master = masterGain.load (std::memory_order_relaxed);
+        juce::FloatVectorOperations::multiply (left, master, n);
+        juce::FloatVectorOperations::multiply (right, master, n);
+        blockLeftPeak = std::max (blockLeftPeak, peakOf (left, n));
+        blockRightPeak = std::max (blockRightPeak, peakOf (right, n));
+        blockOutputPeak = std::max ({ blockOutputPeak, blockLeftPeak, blockRightPeak });
 
         if (running)
             transportPos.store (pos + n, std::memory_order_relaxed);
 
+        // Left on even outputs, right on odd ones; a single output gets both.
         for (int ch = 0; ch < numOutputChannels; ++ch)
-            if (outputChannelData[ch] != nullptr)
-                juce::FloatVectorOperations::copy (outputChannelData[ch] + offset, mix, n);
+        {
+            auto* out = outputChannelData[ch];
+            if (out == nullptr)
+                continue;
+            if (numOutputChannels == 1)
+            {
+                juce::FloatVectorOperations::copy (out + offset, left, n);
+                juce::FloatVectorOperations::add (out + offset, right, n);
+                juce::FloatVectorOperations::multiply (out + offset, 0.5f, n);
+            }
+            else
+            {
+                juce::FloatVectorOperations::copy (out + offset, (ch % 2 == 0) ? left : right, n);
+            }
+        }
 
         offset += n;
     }
@@ -426,4 +589,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     outputPeak.store (blockOutputPeak, std::memory_order_relaxed);
     guitarPeak.store (blockGuitarPeak, std::memory_order_relaxed);
     loopPeak.store (blockLoopPeak, std::memory_order_relaxed);
+    songPeak.store (blockSongPeak, std::memory_order_relaxed);
+    outputPeakLeft.store (blockLeftPeak, std::memory_order_relaxed);
+    outputPeakRight.store (blockRightPeak, std::memory_order_relaxed);
 }

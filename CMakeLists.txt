@@ -51,10 +51,14 @@ target_sources(Roadie PRIVATE
     Source/AudioEngine.cpp
     Source/AmpEngine.cpp
     Source/ToneStack.cpp
+    Source/NoiseGate.cpp
     Source/Looper.cpp
     Source/Metronome.cpp
     Source/TakeRecorder.cpp
     Source/SyncAnalysis.cpp
+    Source/SongAnalysis.cpp
+    Source/Tuner.cpp
+    Source/TimeStretch.cpp
     Source/Project.cpp
     Source/CaptureLibrary.cpp
     Source/Theme.cpp
@@ -65,6 +69,8 @@ target_sources(Roadie PRIVATE
     Source/UI/LibraryPanel.cpp
     Source/UI/Timeline.cpp
     Source/UI/Inspector.cpp
+    Source/UI/Monitor.cpp
+    Source/UI/StagePanel.cpp
     Source/UI/ExportSheet.cpp)
 
 # Camera capture and clip export talk to AVFoundation directly (see
@@ -125,7 +131,7 @@ add_executable(RoadieLooperTests Tests/LooperTests.cpp Source/Looper.cpp)
 target_include_directories(RoadieLooperTests PRIVATE Source)
 add_test(NAME looper COMMAND RoadieLooperTests)
 
-add_executable(RoadieDspTests Tests/DspTests.cpp Source/ToneStack.cpp Source/SyncAnalysis.cpp Source/Metronome.cpp)
+add_executable(RoadieDspTests Tests/DspTests.cpp Source/TimeStretch.cpp Source/Tuner.cpp Source/NoiseGate.cpp Source/ToneStack.cpp Source/SyncAnalysis.cpp Source/SongAnalysis.cpp Source/Metronome.cpp)
 target_include_directories(RoadieDspTests PRIVATE Source)
 add_test(NAME dsp COMMAND RoadieDspTests)
 
@@ -135,13 +141,16 @@ add_test(NAME dsp COMMAND RoadieDspTests)
 juce_add_console_app(RoadieEngineTests PRODUCT_NAME "RoadieEngineTests")
 target_sources(RoadieEngineTests PRIVATE
     Tests/EngineTests.cpp
+    Source/Tuner.cpp
     Source/AudioEngine.cpp
     Source/AmpEngine.cpp
     Source/ToneStack.cpp
+    Source/NoiseGate.cpp
     Source/Looper.cpp
     Source/Metronome.cpp
     Source/TakeRecorder.cpp
     Source/SyncAnalysis.cpp
+    Source/SongAnalysis.cpp
     Source/Project.cpp)
 if(APPLE)
     set(ROADIE_TEST_MAC_SOURCES Source/ClipExporter_mac.mm Tests/TestMovie_mac.mm)

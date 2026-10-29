@@ -1,5 +1,7 @@
 #include "Session.h"
 
+#include "SongAnalysis.h"
+#include "TimeStretch.h"
 #include "SyncAnalysis.h"
 
 namespace
@@ -17,7 +19,7 @@ juce::String utf8 (const char* text)
     return juce::String::fromUTF8 (text);
 }
 
-bool writeMonoWav (const juce::File& file, const std::vector<float>& samples, double sampleRate)
+bool writeWav (const juce::File& file, std::initializer_list<const std::vector<float>*> channels, double sampleRate)
 {
     file.deleteFile();
     std::unique_ptr<juce::OutputStream> stream = file.createOutputStream();
@@ -27,13 +29,25 @@ bool writeMonoWav (const juce::File& file, const std::vector<float>& samples, do
     juce::WavAudioFormat wav;
     auto writer = wav.createWriterFor (stream, juce::AudioFormatWriterOptions{}
                                                    .withSampleRate (sampleRate)
-                                                   .withNumChannels (1)
+                                                   .withNumChannels ((int) channels.size())
                                                    .withBitsPerSample (24));
     if (writer == nullptr)
         return false;
 
-    const float* channels[1] = { samples.data() };
-    return writer->writeFromFloatArrays (channels, 1, (int) samples.size());
+    std::vector<const float*> data;
+    for (const auto* channel : channels)
+        data.push_back (channel->data());
+    return writer->writeFromFloatArrays (data.data(), (int) data.size(), (int) (*channels.begin())->size());
+}
+
+bool writeMonoWav (const juce::File& file, const std::vector<float>& samples, double sampleRate)
+{
+    return writeWav (file, { &samples }, sampleRate);
+}
+
+bool writeStereoWav (const juce::File& file, const Session::StereoMix& mix, double sampleRate)
+{
+    return writeWav (file, { &mix.left, &mix.right }, sampleRate);
 }
 
 float dbToGain (float db) { return db <= -59.9f ? 0.0f : std::pow (10.0f, db / 20.0f); }
@@ -49,6 +63,36 @@ bool readMonoWav (const juce::File& file, std::vector<float>& samples, double& s
     samples.assign ((size_t) reader->lengthInSamples, 0.0f);
     float* channels[1] = { samples.data() };
     reader->read (channels, 1, 0, (int) reader->lengthInSamples);
+    sampleRate = reader->sampleRate;
+    return true;
+}
+
+// Decodes any format the system reads (MP3, M4A/AAC, WAV, AIFF, FLAC, CAF)
+// to stereo; a mono file goes to both sides.
+bool readStereo (const juce::File& file, std::vector<float>& left, std::vector<float>& right, double& sampleRate, juce::String& error)
+{
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
+    if (reader == nullptr || reader->lengthInSamples <= 0)
+    {
+        error = juce::String::fromUTF8 ("Impossible de lire ") + file.getFileName()
+                + juce::String::fromUTF8 (". Les titres d'Apple Music ou de Spotify sont prot\xc3\xa9g\xc3\xa9s : il faut un MP3, M4A, WAV, AIFF ou FLAC.");
+        return false;
+    }
+    if (reader->lengthInSamples > (juce::int64) (reader->sampleRate * 20.0 * 60.0))
+    {
+        error = juce::String::fromUTF8 ("Morceau trop long (20 minutes au plus).");
+        return false;
+    }
+
+    const int length = (int) reader->lengthInSamples;
+    juce::AudioBuffer<float> buffer (2, length);
+    reader->read (&buffer, 0, length, 0, true, true);
+    if (reader->numChannels < 2)
+        buffer.copyFrom (1, 0, buffer, 0, 0, length);
+    left.assign (buffer.getReadPointer (0), buffer.getReadPointer (0) + length);
+    right.assign (buffer.getReadPointer (1), buffer.getReadPointer (1) + length);
     sampleRate = reader->sampleRate;
     return true;
 }
@@ -111,6 +155,13 @@ Session::Session()
     library.setFolders (folders);
 
     syncLagSeconds = s.getDoubleValue ("syncLagSeconds", 0.0);
+    setLatencyAdjustmentMs (s.getDoubleValue ("latencyAdjustmentMs", 0.0));
+    armedGuitar = s.getBoolValue ("armGuitar", true);
+    countInOn = s.getBoolValue ("countIn", true);
+    loopCountIn = s.getBoolValue ("loopCountIn", true);
+    loopBars = s.getIntValue ("loopBars", 0);
+    magnetOn = s.getBoolValue ("magnet", true);
+    armedVideo = s.getBoolValue ("armVideo", true);
     calibrated = s.getBoolValue ("calibrated", false);
 
     const juce::File lastProject (s.getValue ("lastProject"));
@@ -156,6 +207,7 @@ void Session::saveSettings()
     s.setValue ("libraryFolders", folders.joinIntoString ("\n"));
     s.setValue ("syncLagSeconds", syncLagSeconds);
     s.setValue ("calibrated", calibrated);
+    s.setValue ("latencyAdjustmentMs", latencyAdjustmentMs);
     s.setValue ("lastProject", project.folder.getFullPathName());
 
     if (auto audioState = deviceManager.createStateXml())
@@ -171,9 +223,11 @@ void Session::timerCallback()
     if (std::abs (engine.getSampleRate() - mediaSampleRate) > 0.5)
     {
         mediaSampleRate = engine.getSampleRate();
+        setLatencyAdjustmentMs (latencyAdjustmentMs);
         reloadAllTakeMedia();
         pushArrangementToEngine();
         pushCycleToEngine();
+        loadSongMedia();
     }
 
     if (engine.getLoopRecordCount() != knownLoopRecordCount)
@@ -188,8 +242,9 @@ void Session::timerCallback()
         else if (nowSeconds() - calibrationStartedAt > calibrationSeconds + 4.0)
         {
             camera.stopMicCapture();
-            calibrationState = CalibrationState::failed;
+            calibrationState = autoCalibration ? CalibrationState::idle : CalibrationState::failed;
             calibrationMessage = utf8 ("Le micro de la cam\xc3\xa9ra n'a rien envoy\xc3\xa9 \xe2\x80\x94 v\xc3\xa9rifie l'acc\xc3\xa8s au micro.");
+            autoCalibration = false;
             sendChangeMessage();
         }
     }
@@ -290,6 +345,8 @@ void Session::loadCapture (const juce::File& namFile)
             loadingCapture = false;
             if (ok)
             {
+                if (project.captureFile != namFile)
+                    markModified();
                 project.captureFile = namFile;
                 captureTag = info.tag;
             }
@@ -319,11 +376,13 @@ void Session::loadImpulseResponse (const juce::File& irFile)
 
     engine.getAmp().loadImpulseResponse (irFile);
     project.irFile = irFile;
+    markModified();
     sendChangeMessage();
 }
 
 void Session::clearImpulseResponse()
 {
+    markModified();
     engine.getAmp().clearImpulseResponse();
     project.irFile = juce::File();
     sendChangeMessage();
@@ -346,6 +405,7 @@ juce::Range<float> Session::getKnobRange (Knob knob)
     {
         case Knob::gain:   return { -20.0f, 20.0f };
         case Knob::volume: return { -40.0f, 12.0f };
+        case Knob::gate:   return { -90.0f, -20.0f };
         case Knob::bass:
         case Knob::mid:
         case Knob::treble:
@@ -356,6 +416,7 @@ juce::Range<float> Session::getKnobRange (Knob knob)
 
 void Session::setKnob (Knob knob, float db)
 {
+    markModified();
     db = getKnobRange (knob).clipValue (db);
     knobs[(size_t) knob] = db;
 
@@ -368,6 +429,7 @@ void Session::setKnob (Knob knob, float db)
         case Knob::mid:      amp.getToneStack().setGainDb (ToneStack::mid, db); break;
         case Knob::treble:   amp.getToneStack().setGainDb (ToneStack::treble, db); break;
         case Knob::presence: amp.getToneStack().setGainDb (ToneStack::presence, db); break;
+        case Knob::gate:     amp.getGate().setThresholdDb (db); project.gateThresholdDb = db; break;
     }
 }
 
@@ -376,9 +438,54 @@ float Session::getKnob (Knob knob) const
     return knobs[(size_t) knob];
 }
 
+void Session::setGateOn (bool shouldBeOn)
+{
+    markModified();
+    project.gateOn = shouldBeOn;
+    engine.getAmp().getGate().setEnabled (shouldBeOn);
+    sendChangeMessage();
+}
+
+void Session::setBypassed (AmpEngine::Block block, bool bypassed)
+{
+    markModified();
+    engine.getAmp().setBypassed (block, bypassed);
+    switch (block)
+    {
+        case AmpEngine::Block::capture: project.bypassCapture = bypassed; break;
+        case AmpEngine::Block::eq:      project.bypassEq = bypassed; break;
+        case AmpEngine::Block::cab:     project.bypassCab = bypassed; break;
+    }
+    sendChangeMessage();
+}
+
+void Session::setMasterVolume (float db)
+{
+    markModified();
+    project.masterVolumeDb = juce::jlimit (-60.0f, 6.0f, db);
+    engine.setMasterGain (dbToGain (project.masterVolumeDb));
+}
+
+void Session::setArmed (Track track, bool armed)
+{
+    if (track == Track::amp)
+        armedGuitar = armed;
+    else if (track == Track::camera)
+        armedVideo = armed;
+    getSettings().setValue ("armGuitar", armedGuitar);
+    getSettings().setValue ("armVideo", armedVideo);
+    sendChangeMessage();
+}
+
+bool Session::isArmed (Track track) const
+{
+    return track == Track::amp ? armedGuitar : (track == Track::camera && armedVideo);
+}
+
 //==============================================================================
 void Session::setBpm (double newBpm)
 {
+    markModified();
     bpm = juce::jlimit (40.0, 240.0, newBpm);
     engine.getMetronome().setBpm (bpm);
     sendChangeMessage();
@@ -388,6 +495,7 @@ double Session::getBpm() const { return bpm; }
 
 void Session::setBeatsPerBar (int beats)
 {
+    markModified();
     beatsPerBar = juce::jlimit (2, 7, beats);
     engine.getMetronome().setBeatsPerBar (beatsPerBar);
     sendChangeMessage();
@@ -397,6 +505,7 @@ int Session::getBeatsPerBar() const { return beatsPerBar; }
 
 void Session::setMetronomeOn (bool shouldBeOn)
 {
+    markModified();
     metronomeOn = shouldBeOn;
     engine.getMetronome().setEnabled (shouldBeOn);
     sendChangeMessage();
@@ -410,9 +519,111 @@ double Session::getSamplesPerBar() const
 }
 
 //==============================================================================
-void Session::recordLoop()      { engine.recordLoop(); sendChangeMessage(); }
-void Session::undo()            { engine.getLooper().requestUndo(); sendChangeMessage(); }
-void Session::clearLoop()       { engine.getLooper().requestClear(); sendChangeMessage(); }
+void Session::recordLoop()
+{
+    project.looperTrack = true;
+    markModified();
+
+    // Pressed during the count-in: cancel it.
+    if (engine.isLoopScheduled())
+    {
+        engine.cancelLoopSchedule();
+        notify (utf8 ("D\xc3\xa9" "compte annul\xc3\xa9."));
+        sendChangeMessage();
+        return;
+    }
+
+    if (engine.getLooper().getState() == Looper::State::Empty && (loopCountIn || loopBars > 0))
+    {
+        const double bar = getSecondsPerBar(), beat = getSecondsPerBeat();
+        const double now = getPlayheadSeconds();
+        double start = now;
+        if (loopCountIn)
+        {
+            // A bar of clicks: up to the next bar line, at least one beat away.
+            start = std::ceil (now / bar - 1.0e-6) * bar;
+            if (start - now < beat * 0.9)
+                start += bar;
+            engine.getMetronome().setCountInEnd (toSamples (start));
+        }
+        engine.scheduleLoopRecord (toSamples (start), loopBars > 0 ? toSamples (start + loopBars * bar) : AudioEngine::noLocate);
+        engine.play();
+        sendChangeMessage();
+        return;
+    }
+
+    engine.recordLoop();
+    sendChangeMessage();
+}
+
+void Session::setLoopCountInOn (bool shouldBeOn)
+{
+    loopCountIn = shouldBeOn;
+    getSettings().setValue ("loopCountIn", loopCountIn);
+    sendChangeMessage();
+}
+
+void Session::setLoopBars (int bars)
+{
+    loopBars = juce::jlimit (0, 32, bars);
+    getSettings().setValue ("loopBars", loopBars);
+    sendChangeMessage();
+}
+
+void Session::removeLooperTrack()
+{
+    engine.cancelLoopSchedule();
+    engine.getLooper().requestClear();
+    project.looperTrack = false;
+    if (selection == Selection::loop)
+        selection = Selection::none;
+    markModified();
+    sendChangeMessage();
+}
+
+void Session::setMagnetOn (bool shouldBeOn)
+{
+    magnetOn = shouldBeOn;
+    getSettings().setValue ("magnet", magnetOn);
+    sendChangeMessage();
+}
+
+bool Session::isHiddenInLibrary (const juce::String& kind, const juce::String& key) const
+{
+    return juce::StringArray::fromLines (const_cast<Session&> (*this).getSettings().getValue ("hidden." + kind)).contains (key);
+}
+
+void Session::setHiddenInLibrary (const juce::String& kind, const juce::String& key, bool shouldBeHidden)
+{
+    auto list = juce::StringArray::fromLines (getSettings().getValue ("hidden." + kind));
+    list.removeEmptyStrings();
+    if (shouldBeHidden)
+        list.addIfNotAlreadyThere (key);
+    else
+        list.removeString (key);
+    getSettings().setValue ("hidden." + kind, list.joinIntoString ("\n"));
+    sendChangeMessage();
+}
+
+int Session::countHiddenInLibrary (const juce::String& kind) const
+{
+    if (kind == "takes")
+        return (int) std::count_if (project.takes.begin(), project.takes.end(), [] (const Take& t) { return t.hidden; });
+    auto list = juce::StringArray::fromLines (const_cast<Session&> (*this).getSettings().getValue ("hidden." + kind));
+    list.removeEmptyStrings();
+    return list.size();
+}
+
+void Session::setTakeHidden (int takeIndex, bool shouldBeHidden)
+{
+    if (! juce::isPositiveAndBelow (takeIndex, (int) project.takes.size()))
+        return;
+    project.takes[(size_t) takeIndex].hidden = shouldBeHidden;
+    markModified();
+    sendChangeMessage();
+}
+void Session::undo()            { engine.getLooper().requestUndo(); markModified(); sendChangeMessage(); }
+void Session::clearLoop()       { engine.getLooper().requestClear(); markModified(); sendChangeMessage(); }
 
 void Session::togglePlay()
 {
@@ -475,6 +686,7 @@ void Session::jumpBars (int bars)
 
 void Session::setCycleRange (double start, double end)
 {
+    markModified();
     project.cycleStart = std::max (0.0, std::min (start, end));
     project.cycleEnd = std::max (start, end);
     pushCycleToEngine();
@@ -483,6 +695,7 @@ void Session::setCycleRange (double start, double end)
 
 void Session::setCycleOn (bool shouldBeOn)
 {
+    markModified();
     // First use: cycle the region under the playhead, or four bars from it.
     if (shouldBeOn && project.cycleEnd - project.cycleStart < 0.05)
     {
@@ -518,6 +731,11 @@ void Session::toggleTakeRecording()
 
     if (! recordingTake)
     {
+        if (! armedGuitar)
+        {
+            notify (utf8 ("Arme la piste Guitare (son bouton \xe2\x97\x8f) pour enregistrer une prise."));
+            return;
+        }
         if (! project.getTakesFolder().createDirectory())
         {
             notify (utf8 ("Impossible de cr\xc3\xa9" "er le dossier du projet."));
@@ -530,14 +748,28 @@ void Session::toggleTakeRecording()
         pendingTake.audioFile = project.getTakeFile (number, ".wav");
         pendingTake.createdAt = juce::Time::getCurrentTime();
 
+        // Count-in: back a bar before the playhead (before the timeline's
+        // first bar when it sits at 0), clicking through it while already
+        // recording. The take's region starts where the playhead was.
+        countInTarget = -1.0;
+        std::int64_t from = AudioEngine::noLocate;
+        if (countInOn)
+        {
+            const double bar = getSecondsPerBar();
+            countInTarget = getPlayheadSeconds();
+            from = toSamples (countInTarget - bar);
+            engine.getMetronome().setCountInEnd (toSamples (countInTarget));
+        }
+
         engine.play();
-        if (! engine.startTake (pendingTake.audioFile))
+        pendingTake.dryFile = project.getTakeFile (number, ".dry.wav");
+        if (! engine.startTake (pendingTake.audioFile, from, pendingTake.dryFile))
         {
             notify (utf8 ("Impossible d'\xc3\xa9" "crire la prise sur le disque."));
             return;
         }
 
-        if (camera.isOpen() && ! muted[(size_t) Track::camera])
+        if (camera.isOpen() && armedVideo)
         {
             pendingTake.videoFile = project.getTakeFile (number, ".mov");
             if (! camera.startRecording (pendingTake.videoFile))
@@ -547,12 +779,27 @@ void Session::toggleTakeRecording()
         recordingTake = true;
         takeStartedAt = nowSeconds();
         sendChangeMessage();
+
+        // Not synchronised yet: learn it from this take, from the first
+        // seconds of playing — no clap, no wizard.
+        if (! calibrated && camera.isOpen() && ! pendingTake.videoFile.getFullPathName().isEmpty())
+            startAutoCalibration();
         return;
+    }
+
+    if (autoCalibration && calibrationState == CalibrationState::listening)
+    {
+        // Stopped before enough was heard: forget it, the next take tries again.
+        camera.stopMicCapture();
+        engine.startCalibrationCapture (0.0);
+        calibrationState = CalibrationState::idle;
+        autoCalibration = false;
     }
 
     recordingTake = false;
     finishingTake = true;
     pendingTakeStart = getTakeStartSeconds();
+    engine.getMetronome().setCountInEnd (-1);
 
     auto& recorder = engine.getTakeRecorder();
     pendingTake.audioStartHostSeconds = recorder.getFirstSampleHostSeconds();
@@ -593,11 +840,29 @@ void Session::finishTake (bool videoOk, double firstFrameHostSeconds)
         pendingTake.videoFile = juce::File();
     }
 
-    if (pendingTake.durationSeconds < 0.2)
+    // The take lands where it was played. One started at 0 begins a round
+    // trip before the timeline, and a count-in is in the file but not in
+    // the region: both are trimmed off.
+    Clip clip;
+    clip.start = pendingTakeStart;
+    clip.length = pendingTake.durationSeconds;
+    const double regionStart = std::max (0.0, countInTarget);
+    const bool stoppedInCountIn = countInTarget >= 0.0 && clip.start + clip.length <= regionStart + 0.2;
+    countInTarget = -1.0;
+    if (clip.start < regionStart)
+    {
+        clip.sourceStart = regionStart - clip.start;
+        clip.length -= clip.sourceStart;
+        clip.start = regionStart;
+    }
+
+    if (clip.length < 0.2)
     {
         pendingTake.audioFile.deleteFile();
         pendingTake.videoFile.deleteFile();
-        notify (utf8 ("Prise trop courte, ignor\xc3\xa9" "e."));
+        pendingTake = {};
+        notify (stoppedInCountIn ? utf8 ("Prise arr\xc3\xaat\xc3\xa9" "e pendant le d\xc3\xa9" "compte, ignor\xc3\xa9" "e.")
+                                 : utf8 ("Prise trop courte, ignor\xc3\xa9" "e."));
         return;
     }
 
@@ -607,12 +872,8 @@ void Session::finishTake (bool videoOk, double firstFrameHostSeconds)
 
     const int takeIndex = (int) project.takes.size() - 1;
     loadTakeMedia (takeIndex);
-
-    // The take lands where it was played.
-    Clip clip;
     clip.take = takeIndex;
-    clip.start = pendingTakeStart;
-    clip.length = project.takes.back().durationSeconds;
+
     auto edited = project.arrangement;
     edited.clips.push_back (clip);
     applyEdit (edited, "Enregistrer " + project.takes.back().name);
@@ -623,6 +884,157 @@ void Session::finishTake (bool videoOk, double firstFrameHostSeconds)
     saveProject();
     notify (project.takes.back().name + (withVideo ? utf8 (" enregistr\xc3\xa9" "e (audio + vid\xc3\xa9o)")
                                                    : utf8 (" enregistr\xc3\xa9" "e (audio)")));
+}
+
+bool Session::canReampTake (int takeIndex) const
+{
+    return ! reamping && ! recordingTake && juce::isPositiveAndBelow (takeIndex, (int) project.takes.size())
+           && project.takes[(size_t) takeIndex].dryFile.existsAsFile() && engine.getAmp().isLoaded();
+}
+
+void Session::reampTake (int takeIndex)
+{
+    if (! canReampTake (takeIndex))
+    {
+        notify (utf8 ("Cette prise n'a pas de son sec : seules les prises enregistr\xc3\xa9" "es depuis cette version peuvent \xc3\xaatre r\xc3\xa9-amplifi\xc3\xa9" "es."));
+        return;
+    }
+
+    reamping = true;
+    notify (utf8 ("R\xc3\xa9-amplification de ") + project.takes[(size_t) takeIndex].name + utf8 ("\xe2\x80\xa6"));
+    sendChangeMessage();
+
+    // The amp exactly as it is now, rebuilt off to the side.
+    struct Settings
+    {
+        juce::File capture, ir;
+        std::array<float, 7> knobsCopy {};
+        bool gateOn = false, bypassCapture = false, bypassEq = false, bypassCab = false;
+    } settings;
+    auto& liveAmp = engine.getAmp();
+    settings.capture = liveAmp.getModelFile();
+    settings.ir = liveAmp.isIrLoaded() ? liveAmp.getIrFile() : juce::File();
+    for (size_t i = 0; i < settings.knobsCopy.size() && i < knobs.size(); ++i)
+        settings.knobsCopy[i] = knobs[i];
+    settings.gateOn = liveAmp.getGate().isEnabled();
+    settings.bypassCapture = liveAmp.isBypassed (AmpEngine::Block::capture);
+    settings.bypassEq = liveAmp.isBypassed (AmpEngine::Block::eq);
+    settings.bypassCab = liveAmp.isBypassed (AmpEngine::Block::cab);
+
+    const auto dryFile = project.takes[(size_t) takeIndex].dryFile;
+    const auto target = project.takes[(size_t) takeIndex].audioFile;
+    const double sr = engine.getSampleRate();
+
+    std::weak_ptr<bool> weak = alive;
+    loaderPool.addJob ([this, weak, takeIndex, settings, dryFile, target, sr]
+    {
+        juce::String error;
+        std::vector<float> samples;
+        double rate = 0.0;
+        bool ok = readMonoWav (dryFile, samples, rate);
+        if (! ok)
+            error = utf8 ("Son sec illisible.");
+
+        if (ok)
+        {
+            AmpEngine amp;
+            constexpr int block = 512;
+            amp.prepare (rate, block);
+            ok = amp.loadModel (settings.capture, error);
+            if (ok)
+            {
+                amp.setInputGainDb (settings.knobsCopy[(size_t) Knob::gain]);
+                amp.setOutputVolumeDb (settings.knobsCopy[(size_t) Knob::volume]);
+                amp.getToneStack().setGainDb (ToneStack::bass, settings.knobsCopy[(size_t) Knob::bass]);
+                amp.getToneStack().setGainDb (ToneStack::mid, settings.knobsCopy[(size_t) Knob::mid]);
+                amp.getToneStack().setGainDb (ToneStack::treble, settings.knobsCopy[(size_t) Knob::treble]);
+                amp.getToneStack().setGainDb (ToneStack::presence, settings.knobsCopy[(size_t) Knob::presence]);
+                amp.getGate().setEnabled (settings.gateOn);
+                amp.getGate().setThresholdDb (settings.knobsCopy[(size_t) Knob::gate]);
+                amp.setBypassed (AmpEngine::Block::capture, settings.bypassCapture);
+                amp.setBypassed (AmpEngine::Block::eq, settings.bypassEq);
+                amp.setBypassed (AmpEngine::Block::cab, settings.bypassCab);
+                if (settings.ir != juce::File())
+                {
+                    amp.loadImpulseResponse (settings.ir);
+                    // The convolution swaps its response in from process(): feed it silence until it has.
+                    std::vector<float> silence (block, 0.0f);
+                    for (int i = 0; i < 500 && ! amp.isIrReady(); ++i)
+                    {
+                        amp.process (silence.data(), block);
+                        juce::Thread::sleep (10);
+                    }
+                }
+
+                // A few blocks of silence first: the capture picks up and settles.
+                std::vector<float> warm (block, 0.0f);
+                for (int i = 0; i < 4; ++i)
+                    amp.process (warm.data(), block);
+
+                for (size_t i = 0; i < samples.size(); i += block)
+                    amp.process (samples.data() + i, (int) std::min<size_t> (block, samples.size() - i));
+
+                // Written beside, then swapped in: a failed write never costs the take.
+                const auto temp = target.getSiblingFile (target.getFileNameWithoutExtension() + ".reamp.wav");
+                temp.deleteFile();
+                juce::WavAudioFormat wav;
+                std::unique_ptr<juce::OutputStream> stream = temp.createOutputStream();
+                if (stream != nullptr)
+                    if (auto writer = wav.createWriterFor (stream, juce::AudioFormatWriterOptions{}.withSampleRate (rate).withNumChannels (1).withBitsPerSample (24)))
+                    {
+                        const float* channel[1] = { samples.data() };
+                        writer->writeFromFloatArrays (channel, 1, (int) samples.size());
+                        writer.reset();
+                        ok = temp.moveFileTo (target);
+                    }
+                    else
+                        ok = false;
+                else
+                    ok = false;
+                if (! ok && error.isEmpty())
+                    error = utf8 ("\xc3\x89" "criture impossible.");
+            }
+        }
+
+        juce::MessageManager::callAsync ([this, weak, takeIndex, ok, error]
+        {
+            if (weak.expired())
+                return;
+            reamping = false;
+            if (ok)
+            {
+                loadTakeMedia (takeIndex);
+                pushArrangementToEngine();
+                markModified();
+                notify (project.takes[(size_t) takeIndex].name + utf8 (" r\xc3\xa9-amplifi\xc3\xa9" "e avec ") + engine.getAmp().getModelName() + ".");
+            }
+            else
+            {
+                notify (utf8 ("R\xc3\xa9-amplification impossible : ") + error);
+            }
+            sendChangeMessage();
+        });
+    });
+}
+
+void Session::setCountInOn (bool shouldBeOn)
+{
+    countInOn = shouldBeOn;
+    getSettings().setValue ("countIn", countInOn);
+    sendChangeMessage();
+}
+
+int Session::getCountInBeatsLeft() const
+{
+    if (engine.isLoopScheduled() && engine.getLoopStartAt() != AudioEngine::noLocate)
+    {
+        const double left = (double) engine.getLoopStartAt() / engine.getSampleRate() - getPlayheadSeconds();
+        return left > 0.0 ? (int) std::ceil (left / getSecondsPerBeat() - 1.0e-6) : 0;
+    }
+    if (! recordingTake || countInTarget < 0.0)
+        return 0;
+    const double left = countInTarget - getPlayheadSeconds();
+    return left > 0.0 ? (int) std::ceil (left / getSecondsPerBeat() - 1.0e-6) : 0;
 }
 
 double Session::getTakeSeconds() const
@@ -654,16 +1066,18 @@ bool Session::isSolo (Track track) const { return soloed[(size_t) track]; }
 
 void Session::updateMuteState()
 {
-    const bool guitarSolo = soloed[(size_t) Track::amp];
-    const bool loopSolo = soloed[(size_t) Track::loop];
-
-    engine.setGuitarMuted (muted[(size_t) Track::amp] || (loopSolo && ! guitarSolo));
-    engine.setLoopMuted (muted[(size_t) Track::loop] || (guitarSolo && ! loopSolo));
+    // A soloed track silences the others that aren't soloed.
+    const bool anySolo = soloed[(size_t) Track::amp] || soloed[(size_t) Track::loop] || soloed[(size_t) Track::song];
+    auto silent = [this, anySolo] (Track t) { return muted[(size_t) t] || (anySolo && ! soloed[(size_t) t]); };
+    engine.setGuitarMuted (silent (Track::amp));
+    engine.setLoopMuted (silent (Track::loop));
+    engine.setSongMuted (silent (Track::song));
     sendChangeMessage();
 }
 
 void Session::setTrackVolume (Track track, float db)
 {
+    markModified();
     db = juce::jlimit (-60.0f, 6.0f, db);
     if (track == Track::amp)
     {
@@ -675,11 +1089,23 @@ void Session::setTrackVolume (Track track, float db)
         project.loopVolumeDb = db;
         engine.setLoopGain (dbToGain (db));
     }
+    else if (track == Track::song)
+    {
+        project.songVolumeDb = db;
+        engine.setSongGain (dbToGain (db));
+    }
 }
 
 float Session::getTrackVolume (Track track) const
 {
-    return track == Track::amp ? project.guitarVolumeDb : (track == Track::loop ? project.loopVolumeDb : 0.0f);
+    switch (track)
+    {
+        case Track::amp:  return project.guitarVolumeDb;
+        case Track::loop: return project.loopVolumeDb;
+        case Track::song: return project.songVolumeDb;
+        case Track::camera:
+        default:          return 0.0f;
+    }
 }
 
 //==============================================================================
@@ -694,6 +1120,7 @@ void Session::applyEdit (const Arrangement& edited, const juce::String& actionNa
     redoStack.clear();
 
     project.arrangement = edited;
+    markModified();
     if (selection == Selection::clip && ! juce::isPositiveAndBelow (selectedClip, (int) edited.clips.size()))
         clearSelection();
     pushArrangementToEngine();
@@ -875,6 +1302,27 @@ bool Session::isTakeUsed (int takeIndex) const
     return false;
 }
 
+bool Session::isLooperTrackVisible() const
+{
+    return project.looperTrack || engine.getLooper().getState() != Looper::State::Empty;
+}
+
+void Session::setLooperTrackVisible (bool shouldBeVisible)
+{
+    if (! shouldBeVisible && engine.getLooper().getState() != Looper::State::Empty)
+    {
+        notify (utf8 ("Efface la boucle avant de retirer la piste Looper."));
+        return;
+    }
+    if (project.looperTrack == shouldBeVisible)
+        return;
+    project.looperTrack = shouldBeVisible;
+    if (! shouldBeVisible && selection == Selection::loop)
+        selection = Selection::none;
+    markModified();
+    sendChangeMessage();
+}
+
 bool Session::hasLoop() const
 {
     const auto& looper = engine.getLooper();
@@ -888,7 +1336,8 @@ double Session::getLoopLengthSeconds() const
 
 double Session::getContentEnd() const
 {
-    return project.arrangement.getContentEnd (hasLoop());
+    const double end = project.arrangement.getContentEnd (hasLoop());
+    return hasSong() ? std::max (end, project.arrangement.songStart + getSongLength()) : end;
 }
 
 const Session::TakeMedia* Session::getTakeMedia (int takeIndex) const
@@ -963,6 +1412,7 @@ void Session::pushArrangementToEngine()
 
     const auto& a = project.arrangement;
     engine.setLoopPlacement (toSamples (a.loopAnchor), toSamples (a.loopStart), a.loopEnd < 0.0 ? -1 : toSamples (a.loopEnd));
+    engine.setSongStart (toSamples (a.songStart));
 }
 
 //==============================================================================
@@ -993,8 +1443,28 @@ void Session::closeCamera()
     if (recordingTake)
         toggleTakeRecording();
     camera.close();
+    cameraSuspended = false;
     getSettings().setValue ("cameraEnabled", false);
     sendChangeMessage();
+}
+
+void Session::suspendCamera()
+{
+    if (! camera.isOpen() || recordingTake || finishingTake)
+        return;
+    suspendedCameraDevice = camera.getDeviceName();
+    cameraSuspended = true;
+    camera.close(); // the light goes off; "cameraEnabled" stays as it was
+    sendChangeMessage();
+}
+
+void Session::resumeCamera()
+{
+    if (! cameraSuspended)
+        return;
+    cameraSuspended = false;
+    if (! camera.isOpen() && ! cameraOpening)
+        openCamera (suspendedCameraDevice);
 }
 
 juce::String Session::getCameraDescription() const
@@ -1044,6 +1514,31 @@ void Session::startCalibration()
     });
 }
 
+void Session::startAutoCalibration()
+{
+    if (calibrationState == CalibrationState::starting || calibrationState == CalibrationState::listening)
+        return;
+    autoCalibration = true;
+    calibrationState = CalibrationState::starting;
+    std::weak_ptr<bool> weak = alive;
+    camera.startMicCapture (8.0, [this, weak] (bool ok, juce::String)
+    {
+        if (weak.expired())
+            return;
+        if (! ok || ! recordingTake)
+        {
+            if (ok)
+                camera.stopMicCapture();
+            autoCalibration = false;
+            calibrationState = CalibrationState::idle;
+            return;
+        }
+        engine.startCalibrationCapture (8.0);
+        calibrationState = CalibrationState::listening;
+        calibrationStartedAt = nowSeconds();
+    });
+}
+
 void Session::finishCalibration()
 {
     double interfaceStart = 0.0, cameraStart = 0.0, cameraRate = 0.0;
@@ -1051,14 +1546,28 @@ void Session::finishCalibration()
     const auto cameraAudio = camera.getMicCapture (cameraStart, cameraRate);
     camera.stopMicCapture();
 
-    const auto result = roadie::sync::measureLag ({ interfaceAudio.data(), (int) interfaceAudio.size(), engine.getSampleRate(), interfaceStart },
-                                                  { cameraAudio.data(), (int) cameraAudio.size(), cameraRate, cameraStart });
+    const roadie::sync::Capture interfaceCapture { interfaceAudio.data(), (int) interfaceAudio.size(), engine.getSampleRate(), interfaceStart };
+    const roadie::sync::Capture cameraCapture { cameraAudio.data(), (int) cameraAudio.size(), cameraRate, cameraStart };
+    const bool automatic = autoCalibration;
+    autoCalibration = false;
+    const auto result = automatic ? roadie::sync::measureLagFromPlaying (interfaceCapture, cameraCapture)
+                                  : roadie::sync::measureLag (interfaceCapture, cameraCapture);
+
+    if (automatic && ! result.ok)
+    {
+        // Nothing clear enough in ordinary playing: say nothing, keep the manual button.
+        calibrationState = CalibrationState::idle;
+        sendChangeMessage();
+        return;
+    }
 
     if (result.ok)
     {
         syncLagSeconds = result.interfaceLagSeconds;
         calibrated = true;
-        calibrationState = CalibrationState::done;
+        calibrationState = automatic ? CalibrationState::idle : CalibrationState::done;
+        if (automatic)
+            notify (utf8 ("Cam\xc3\xa9ra synchronis\xc3\xa9" "e automatiquement (") + juce::String (std::abs (syncLagSeconds * 1000.0), 0) + " ms).");
         calibrationMessage = utf8 ("Synchronis\xc3\xa9" "e \xe2\x80\x94 d\xc3\xa9" "calage de ")
                              + juce::String (std::abs (syncLagSeconds * 1000.0), 0) + utf8 (" ms corrig\xc3\xa9.");
         saveSettings();
@@ -1072,7 +1581,447 @@ void Session::finishCalibration()
 }
 
 //==============================================================================
-std::vector<float> Session::renderMix (double start, double end, double sampleRate) const
+//==============================================================================
+bool Session::isSongFile (const juce::File& file)
+{
+    if (! file.hasFileExtension (".mp3;.m4a;.aac;.wav;.aif;.aiff;.flac;.caf;.mp4"))
+        return false;
+    // A WAV or AIFF can also be a cab IR: those last a second or less.
+    if (file.hasFileExtension (".wav;.aif;.aiff"))
+    {
+        juce::AudioFormatManager formats;
+        formats.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
+        return reader != nullptr && reader->sampleRate > 0.0 && reader->lengthInSamples > (juce::int64) (reader->sampleRate * 4.0);
+    }
+    return true;
+}
+
+bool Session::isYouTubeUrl (const juce::String& text)
+{
+    const auto url = juce::URL (text.trim());
+    const auto host = url.getDomain().toLowerCase();
+    return (url.toString (true).startsWithIgnoreCase ("http://") || url.toString (true).startsWithIgnoreCase ("https://"))
+           && (host == "youtu.be" || host == "youtube.com" || host.endsWith (".youtube.com"));
+}
+
+void Session::importSongFromUrl (const juce::String& rawUrl)
+{
+    const auto url = rawUrl.trim();
+    if (importingSong || downloadingSong)
+        return;
+    if (! isYouTubeUrl (url))
+    {
+        notify (utf8 ("Ce n'est pas un lien YouTube."));
+        return;
+    }
+
+    juce::File tool;
+    for (const char* candidate : { "/opt/homebrew/bin/yt-dlp", "/usr/local/bin/yt-dlp", "/usr/bin/yt-dlp" })
+        if (juce::File (candidate).existsAsFile())
+        {
+            tool = juce::File (candidate);
+            break;
+        }
+    if (tool == juce::File())
+        if (const auto local = juce::File::getSpecialLocation (juce::File::userHomeDirectory).getChildFile (".local/bin/yt-dlp"); local.existsAsFile())
+            tool = local;
+    if (tool == juce::File())
+    {
+        notify (utf8 ("Il manque yt-dlp : installe-le avec \xc2\xab brew install yt-dlp \xc2\xbb, puis r\xc3\xa9" "essaie."));
+        return;
+    }
+
+    downloadingSong = true;
+    notify (utf8 ("T\xc3\xa9l\xc3\xa9" "chargement de l'audio YouTube\xe2\x80\xa6"));
+    sendChangeMessage();
+
+    const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                            .getChildFile ("roadie-youtube-" + juce::String::toHexString (juce::Random::getSystemRandom().nextInt64()));
+    std::weak_ptr<bool> weak = alive;
+    loaderPool.addJob ([this, weak, tool, url, folder]
+    {
+        juce::File result;
+        juce::String error;
+        if (folder.createDirectory())
+        {
+            // The URL is one argument after "--": never read as an option, never through a shell.
+            juce::StringArray args { tool.getFullPathName(), "-f", "bestaudio[ext=m4a]/bestaudio", "--no-playlist", "--no-progress",
+                                     "--no-warnings", "-o", folder.getChildFile ("%(title).80s.%(ext)s").getFullPathName(),
+                                     "--print", "after_move:filepath", "--", url };
+            juce::ChildProcess process;
+            if (process.start (args))
+            {
+                const auto output = process.readAllProcessOutput();
+                if (process.waitForProcessToFinish (10 * 60 * 1000) && process.getExitCode() == 0)
+                {
+                    const auto lines = juce::StringArray::fromLines (output.trim());
+                    if (lines.size() > 0)
+                        result = juce::File (lines[lines.size() - 1].trim());
+                }
+                if (! result.existsAsFile())
+                    error = utf8 ("Le t\xc3\xa9l\xc3\xa9" "chargement a \xc3\xa9" "chou\xc3\xa9 (lien priv\xc3\xa9, vid\xc3\xa9o indisponible, ou yt-dlp \xc3\xa0 mettre \xc3\xa0 jour).");
+                else if (! result.hasFileExtension (".m4a;.mp4;.mp3;.wav;.aac"))
+                    error = utf8 ("Format audio non lisible (") + result.getFileExtension() + utf8 (") \xe2\x80\x94 installe ffmpeg : brew install ffmpeg.");
+            }
+            else
+            {
+                error = utf8 ("Impossible de lancer yt-dlp.");
+            }
+        }
+
+        juce::MessageManager::callAsync ([this, weak, result, error, folder]
+        {
+            if (weak.expired())
+            {
+                folder.deleteRecursively();
+                return;
+            }
+            downloadingSong = false;
+            if (error.isEmpty() && result.existsAsFile())
+            {
+                importSong (result);
+                // importSong copies into the project asynchronously; give it time to read the file.
+                juce::Timer::callAfterDelay (120000, [folder] { folder.deleteRecursively(); });
+            }
+            else
+            {
+                notify (error.isNotEmpty() ? error : utf8 ("Le t\xc3\xa9l\xc3\xa9" "chargement a \xc3\xa9" "chou\xc3\xa9."));
+                folder.deleteRecursively();
+            }
+            sendChangeMessage();
+        });
+    });
+}
+
+void Session::importSong (const juce::File& audioFile)
+{
+    if (importingSong)
+        return;
+    if (! audioFile.existsAsFile())
+    {
+        notify (utf8 ("Fichier introuvable : ") + audioFile.getFileName());
+        return;
+    }
+
+    importingSong = true;
+    notify (utf8 ("Analyse de \xc2\xab ") + audioFile.getFileNameWithoutExtension() + utf8 (" \xc2\xbb\xe2\x80\xa6"));
+
+    // The copy lives in the project, so the project stays complete.
+    const auto songFolder = project.getSongFolder();
+    const auto destination = audioFile.isAChildOf (songFolder) ? audioFile : songFolder.getChildFile (audioFile.getFileName());
+    const double engineRate = engine.getSampleRate();
+    const int beatsPerBarNow = beatsPerBar;
+    const int generation = ++songLoadGeneration;
+
+    std::weak_ptr<bool> weak = alive;
+    loaderPool.addJob ([this, weak, audioFile, songFolder, destination, engineRate, beatsPerBarNow, generation]
+    {
+        juce::String error;
+        std::vector<float> left, right;
+        double fileRate = 0.0;
+        const bool ok = readStereo (audioFile, left, right, fileRate, error);
+
+        roadie::song::Analysis analysis;
+        auto media = std::make_shared<SongMedia>();
+        if (ok)
+        {
+            std::vector<float> mono (left.size());
+            for (size_t i = 0; i < mono.size(); ++i)
+                mono[i] = 0.5f * (left[i] + right[i]);
+            analysis = roadie::song::analyse (mono.data(), (int) mono.size(), fileRate, beatsPerBarNow);
+
+            const int perPeak = std::max (1, (int) std::round (fileRate / SongMedia::peaksPerSecond));
+            for (size_t i = 0; i < mono.size(); i += (size_t) perPeak)
+            {
+                float peak = 0.0f;
+                for (size_t j = i; j < std::min (mono.size(), i + (size_t) perPeak); ++j)
+                    peak = std::max (peak, std::abs (mono[j]));
+                media->peaks.push_back (peak);
+            }
+
+            auto audio = std::make_shared<AudioEngine::SongAudio>();
+            audio->left = resample (left, fileRate, engineRate);
+            audio->right = resample (right, fileRate, engineRate);
+            media->audio = audio;
+            media->original = audio;
+            media->sampleRate = engineRate;
+
+            if (destination != audioFile)
+            {
+                songFolder.createDirectory();
+                // One song per project: the previous copy goes.
+                for (const auto& old : songFolder.findChildFiles (juce::File::findFiles, false))
+                    old.deleteFile();
+                if (! audioFile.copyFileTo (destination))
+                    error = utf8 ("Copie du morceau dans le projet impossible.");
+            }
+        }
+        const double duration = ok ? (double) left.size() / fileRate : 0.0;
+
+        juce::MessageManager::callAsync ([this, weak, ok, error, analysis, media, destination, duration, generation, audioFile]
+        {
+            if (weak.expired() || generation != songLoadGeneration)
+                return;
+            importingSong = false;
+            if (! ok || error.isNotEmpty())
+            {
+                notify (error);
+                sendChangeMessage();
+                return;
+            }
+
+            // Remembered for the library's Morceaux tab (the original, not the copy).
+            if (! audioFile.isAChildOf (project.folder))
+            {
+                auto recent = juce::StringArray::fromLines (getSettings().getValue ("recentSongs"));
+                recent.removeString (audioFile.getFullPathName());
+                recent.insert (0, audioFile.getFullPathName());
+                recent.removeEmptyStrings();
+                while (recent.size() > 12)
+                    recent.remove (recent.size() - 1);
+                getSettings().setValue ("recentSongs", recent.joinIntoString ("\n"));
+            }
+
+            Song song;
+            song.file = destination;
+            song.title = destination.getFileNameWithoutExtension();
+            song.duration = duration;
+            song.detectedBpm = analysis.ok ? analysis.bpm : bpm;
+            song.bpm = song.detectedBpm;
+            song.firstDownbeat = analysis.ok ? analysis.firstDownbeatSeconds : 0.0;
+            for (const auto& section : analysis.sections)
+                song.sections.push_back ({ section.startSeconds, section.endSeconds, juce::String (section.label) });
+            project.song = song;
+            songMedia = *media;
+            pushSongToEngine();
+
+            // The song is the click now.
+            setBpm (song.bpm);
+            setMetronomeOn (false);
+            placeSongOnBar2();
+            saveProject();
+            notify (analysis.ok ? juce::String (song.bpm, 1).replaceCharacter ('.', ',') + utf8 (" BPM d\xc3\xa9tect\xc3\xa9 \xe2\x80\x94 1re mesure cal\xc3\xa9" "e sur la mesure 2")
+                                : utf8 ("Tempo non d\xc3\xa9tect\xc3\xa9 : tape-le avec Taper"));
+            sendChangeMessage();
+        });
+    });
+    sendChangeMessage();
+}
+
+void Session::loadSongMedia()
+{
+    const int generation = ++songLoadGeneration;
+    if (! project.song.isSet())
+    {
+        songMedia = {};
+        pushSongToEngine();
+        return;
+    }
+
+    const auto file = project.song.file;
+    const double engineRate = engine.getSampleRate();
+    std::weak_ptr<bool> weak = alive;
+    loaderPool.addJob ([this, weak, file, engineRate, generation]
+    {
+        juce::String error;
+        std::vector<float> left, right;
+        double fileRate = 0.0;
+        auto media = std::make_shared<SongMedia>();
+        const bool ok = readStereo (file, left, right, fileRate, error);
+        if (ok)
+        {
+            const int perPeak = std::max (1, (int) std::round (fileRate / SongMedia::peaksPerSecond));
+            for (size_t i = 0; i < left.size(); i += (size_t) perPeak)
+            {
+                float peak = 0.0f;
+                for (size_t j = i; j < std::min (left.size(), i + (size_t) perPeak); ++j)
+                    peak = std::max ({ peak, std::abs (left[j]), std::abs (right[j]) });
+                media->peaks.push_back (peak);
+            }
+            auto audio = std::make_shared<AudioEngine::SongAudio>();
+            audio->left = resample (left, fileRate, engineRate);
+            audio->right = resample (right, fileRate, engineRate);
+            media->audio = audio;
+            media->original = audio;
+            media->sampleRate = engineRate;
+        }
+
+        juce::MessageManager::callAsync ([this, weak, ok, error, media, generation]
+        {
+            if (weak.expired() || generation != songLoadGeneration)
+                return;
+            if (! ok)
+                notify (error);
+            songMedia = ok ? *media : SongMedia {};
+            pushSongToEngine();
+            if (ok && (std::abs (project.song.speed - 1.0) > 1.0e-6 || project.song.semitones != 0))
+                renderSongVariant();
+            sendChangeMessage();
+        });
+    });
+}
+
+juce::Range<double> Session::getSongSection (int index) const
+{
+    if (! juce::isPositiveAndBelow (index, (int) project.song.sections.size()))
+        return {};
+    const auto& section = project.song.sections[(size_t) index];
+    return { section.start / project.song.speed, section.end / project.song.speed };
+}
+
+void Session::renderSongVariant()
+{
+    if (songMedia.original == nullptr)
+        return;
+
+    renderingSong = true;
+    const int generation = ++songRenderGeneration;
+    const auto original = songMedia.original;
+    const double rate = songMedia.sampleRate, speed = project.song.speed;
+    const int semitones = project.song.semitones;
+    std::weak_ptr<bool> weak = alive;
+    loaderPool.addJob ([this, weak, original, rate, speed, semitones, generation]
+    {
+        auto audio = std::make_shared<AudioEngine::SongAudio>();
+        roadie::stretch::process (original->left, original->right, rate, speed, semitones, audio->left, audio->right);
+
+        // Peaks of what plays: the rendered audio is in timeline time already.
+        std::vector<float> peaks;
+        const int perPeak = std::max (1, (int) std::round (rate / SongMedia::peaksPerSecond));
+        for (size_t i = 0; i < audio->left.size(); i += (size_t) perPeak)
+        {
+            float peak = 0.0f;
+            for (size_t j = i; j < std::min (audio->left.size(), i + (size_t) perPeak); ++j)
+                peak = std::max ({ peak, std::abs (audio->left[j]), std::abs (audio->right[j]) });
+            peaks.push_back (peak);
+        }
+
+        juce::MessageManager::callAsync ([this, weak, audio, peaks, generation]
+        {
+            if (weak.expired() || generation != songRenderGeneration)
+                return;
+            renderingSong = false;
+            songMedia.audio = audio;
+            songMedia.peaks = peaks;
+            pushSongToEngine();
+            sendChangeMessage();
+        });
+    });
+    sendChangeMessage();
+}
+
+void Session::setSongSpeed (double speed)
+{
+    if (! project.song.isSet())
+        return;
+    project.song.speed = juce::jlimit (0.5, 1.0, std::round (speed * 20.0) / 20.0);
+    markModified();
+    // The grid follows: the slower tempo, the first bar still on bar 2.
+    setBpm (project.song.bpm * project.song.speed);
+    placeSongOnBar2();
+    renderSongVariant();
+    notify (juce::String (juce::roundToInt (project.song.speed * 100.0)) + utf8 ("\xc2\xa0% \xc2\xb7 ")
+            + juce::String (project.song.bpm * project.song.speed, 1).replaceCharacter ('.', ',') + " BPM");
+}
+
+void Session::setSongSemitones (int semitones)
+{
+    if (! project.song.isSet())
+        return;
+    project.song.semitones = juce::jlimit (-6, 6, semitones);
+    markModified();
+    renderSongVariant();
+}
+
+void Session::pushSongToEngine()
+{
+    engine.setSong (songMedia.audio);
+    engine.setSongStart (toSamples (project.arrangement.songStart));
+    engine.setSongGain (dbToGain (project.songVolumeDb));
+}
+
+void Session::removeSong()
+{
+    if (! project.song.isSet())
+        return;
+    ++songLoadGeneration;
+    project.song.file.deleteFile();
+    project.song = {};
+    songMedia = {};
+    pushSongToEngine();
+    markModified();
+    saveProject();
+    notify (utf8 ("Morceau retir\xc3\xa9"));
+}
+
+void Session::placeSongOnBar2()
+{
+    if (! project.song.isSet())
+        return;
+    auto edited = project.arrangement;
+    edited.songStart = getSecondsPerBar() - getSongDownbeat();
+    applyEdit (edited, utf8 ("Caler le morceau"));
+    pushSongToEngine();
+}
+
+void Session::setSongTempo (double newBpm)
+{
+    if (! project.song.isSet() || newBpm <= 0.0)
+        return;
+    newBpm = juce::jlimit (40.0, 240.0, newBpm);
+    project.song.bpm = newBpm;
+    setBpm (newBpm * project.song.speed);
+    placeSongOnBar2();
+    notify (juce::String (newBpm, 1).replaceCharacter ('.', ',') + " BPM");
+}
+
+void Session::tapSongTempo()
+{
+    const double now = nowSeconds();
+    if (! taps.empty() && now - taps.back() > 2.0)
+        taps.clear(); // a pause starts a new count
+    taps.push_back (now);
+    // Taps follow what plays: back to the song's own tempo.
+    if (const double tapped = roadie::song::tempoFromTaps (taps); tapped > 0.0)
+        setSongTempo (tapped / project.song.speed);
+    sendChangeMessage();
+}
+
+void Session::nudgeSong (double seconds)
+{
+    if (! project.song.isSet())
+        return;
+    auto edited = project.arrangement;
+    edited.songStart += seconds;
+    applyEdit (edited, utf8 ("D\xc3\xa9" "caler le morceau"));
+    pushSongToEngine();
+}
+
+void Session::cycleSection (int index)
+{
+    if (! juce::isPositiveAndBelow (index, (int) project.song.sections.size()))
+        return;
+    const auto range = getSongSection (index);
+    const double start = project.arrangement.songStart + range.getStart(), end = project.arrangement.songStart + range.getEnd();
+    // Clicking the part already cycling turns the cycle off.
+    if (project.cycleOn && std::abs (project.cycleStart - start) < 0.01 && std::abs (project.cycleEnd - end) < 0.01)
+    {
+        setCycleOn (false);
+        return;
+    }
+    setCycleRange (std::max (0.0, start), end);
+    setCycleOn (true);
+}
+
+void Session::setLatencyAdjustmentMs (double ms)
+{
+    latencyAdjustmentMs = juce::jlimit (-50.0, 100.0, ms);
+    engine.setLatencyAdjustmentSamples ((int) std::lround (latencyAdjustmentMs * 0.001 * engine.getSampleRate()));
+    sendChangeMessage();
+}
+
+Session::StereoMix Session::renderMix (double start, double end, double sampleRate, bool includeSong) const
 {
     const auto total = (size_t) std::max<std::int64_t> (0, (std::int64_t) std::llround ((end - start) * sampleRate));
     std::vector<float> guitar (total, 0.0f), loop (total, 0.0f);
@@ -1120,13 +2069,43 @@ std::vector<float> Session::renderMix (double start, double end, double sampleRa
         }
     }
 
-    const bool guitarSolo = soloed[(size_t) Track::amp], loopSolo = soloed[(size_t) Track::loop];
-    const float g = (muted[(size_t) Track::amp] || (loopSolo && ! guitarSolo)) ? 0.0f : dbToGain (project.guitarVolumeDb);
-    const float l = (muted[(size_t) Track::loop] || (guitarSolo && ! loopSolo)) ? 0.0f : dbToGain (project.loopVolumeDb);
+    const bool anySolo = soloed[(size_t) Track::amp] || soloed[(size_t) Track::loop] || soloed[(size_t) Track::song];
+    auto gainOf = [&] (Track t, float db) { return (muted[(size_t) t] || (anySolo && ! soloed[(size_t) t])) ? 0.0f : dbToGain (db); };
+    const float g = gainOf (Track::amp, project.guitarVolumeDb);
+    const float l = gainOf (Track::loop, project.loopVolumeDb);
+    const float s = includeSong ? gainOf (Track::song, project.songVolumeDb) : 0.0f;
 
-    std::vector<float> mix (total);
+    StereoMix mix;
+    mix.left.resize (total);
+    mix.right.resize (total);
     for (size_t i = 0; i < total; ++i)
-        mix[i] = juce::jlimit (-1.0f, 1.0f, guitar[i] * g + loop[i] * l);
+        mix.left[i] = mix.right[i] = guitar[i] * g + loop[i] * l;
+
+    // The song, in stereo, from its place on the timeline.
+    if (s > 0.0f && songMedia.audio != nullptr)
+    {
+        const auto& audio = *songMedia.audio;
+        const bool sameRate = std::abs (songMedia.sampleRate - sampleRate) < 0.5;
+        const auto left = sameRate ? audio.left : resample (audio.left, songMedia.sampleRate, sampleRate);
+        const auto right = sameRate ? audio.right : resample (audio.right, songMedia.sampleRate, sampleRate);
+        const auto offset = at (project.arrangement.songStart);
+        for (size_t i = 0; i < total; ++i)
+        {
+            const auto source = (std::int64_t) i - offset;
+            if (source >= 0 && source < (std::int64_t) left.size())
+            {
+                mix.left[i] += left[(size_t) source] * s;
+                mix.right[i] += right[(size_t) source] * s;
+            }
+        }
+    }
+
+    const float master = dbToGain (project.masterVolumeDb);
+    for (size_t i = 0; i < total; ++i)
+    {
+        mix.left[i] = juce::jlimit (-1.0f, 1.0f, mix.left[i] * master);
+        mix.right[i] = juce::jlimit (-1.0f, 1.0f, mix.right[i] * master);
+    }
     return mix;
 }
 
@@ -1216,7 +2195,7 @@ void Session::exportClip (const ExportRequest& request, std::function<void (bool
     // The soundtrack: the arrangement's mix over the range.
     const double sr = engine.getSampleRate();
     const auto soundtrack = folder.getChildFile (".mix-" + juce::String (juce::Time::currentTimeMillis()) + ".wav");
-    if (! writeMonoWav (soundtrack, renderMix (request.startSeconds, request.endSeconds, sr), sr))
+    if (! writeStereoWav (soundtrack, renderMix (request.startSeconds, request.endSeconds, sr, request.includeSong), sr))
     {
         onDone (false, utf8 ("\xc3\x89" "criture du mixage impossible."), {});
         return;
@@ -1252,7 +2231,7 @@ juce::File Session::exportAudio (const ExportRequest& request, juce::String& err
     const auto output = folder.getNonexistentChildFile (name, ".wav", false);
 
     const double sr = engine.getSampleRate();
-    if (! writeMonoWav (output, renderMix (request.startSeconds, request.endSeconds, sr), sr))
+    if (! writeStereoWav (output, renderMix (request.startSeconds, request.endSeconds, sr, request.includeSong), sr))
     {
         error = utf8 ("\xc3\x89" "criture du fichier audio impossible.");
         return {};
@@ -1300,6 +2279,7 @@ void Session::captureEngineStateIntoProject()
     project.trebleDb = knobs[(size_t) Knob::treble];
     project.presenceDb = knobs[(size_t) Knob::presence];
     project.volumeDb = knobs[(size_t) Knob::volume];
+    project.gateThresholdDb = knobs[(size_t) Knob::gate];
     project.captureFile = engine.getAmp().isLoaded() ? engine.getAmp().getModelFile() : juce::File();
     project.irFile = engine.getAmp().isIrLoaded() ? engine.getAmp().getIrFile() : juce::File();
     if (camera.isOpen())
@@ -1318,6 +2298,12 @@ void Session::applyProjectToEngine()
     setKnob (Knob::treble, project.trebleDb);
     setKnob (Knob::presence, project.presenceDb);
     setKnob (Knob::volume, project.volumeDb);
+    setKnob (Knob::gate, project.gateThresholdDb);
+    setGateOn (project.gateOn);
+    engine.getAmp().setBypassed (AmpEngine::Block::capture, project.bypassCapture);
+    engine.getAmp().setBypassed (AmpEngine::Block::eq, project.bypassEq);
+    engine.getAmp().setBypassed (AmpEngine::Block::cab, project.bypassCab);
+    setMasterVolume (project.masterVolumeDb);
 
     if (project.captureFile.existsAsFile() && project.captureFile != engine.getAmp().getModelFile())
         loadCapture (project.captureFile);
@@ -1329,6 +2315,8 @@ void Session::applyProjectToEngine()
 
     setTrackVolume (Track::amp, project.guitarVolumeDb);
     setTrackVolume (Track::loop, project.loopVolumeDb);
+    setTrackVolume (Track::song, project.songVolumeDb);
+    loadSongMedia();
     undoStack.clear();
     redoStack.clear();
     selection = Selection::none;
@@ -1362,12 +2350,18 @@ void Session::newProject()
     next.trebleDb = project.trebleDb;
     next.presenceDb = project.presenceDb;
     next.volumeDb = project.volumeDb;
+    next.gateOn = project.gateOn;
+    next.gateThresholdDb = project.gateThresholdDb;
+    next.bypassCapture = project.bypassCapture;
+    next.bypassEq = project.bypassEq;
+    next.bypassCab = project.bypassCab;
     project = std::move (next);
 
     engine.stopAll();
     engine.loadLoop ({}, 0);
     engine.returnToStart();
     applyProjectToEngine();
+    modified = false;
     sendChangeMessage();
 }
 
@@ -1400,6 +2394,7 @@ bool Session::openProject (const juce::File& folderOrJson)
     applyProjectToEngine();
 
     getSettings().setValue ("lastProject", project.folder.getFullPathName());
+    modified = false;
     sendChangeMessage();
     return true;
 }
@@ -1419,6 +2414,7 @@ bool Session::saveProject()
     }
 
     getSettings().setValue ("lastProject", project.folder.getFullPathName());
+    modified = false;
     sendChangeMessage();
     return true;
 }

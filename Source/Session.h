@@ -40,10 +40,18 @@ public:
     juce::String getIrName() const;
     void addCaptureFolder (const juce::File& folder);
 
-    enum class Knob { gain, bass, mid, treble, presence, volume };
+    enum class Knob { gain, bass, mid, treble, presence, volume, gate };
     void setKnob (Knob knob, float db);
     float getKnob (Knob knob) const;
     static juce::Range<float> getKnobRange (Knob knob);
+
+    // The signal chain: the gate at the input, and the blocks that can be
+    // bypassed (Capture, EQ, Baffle).
+    void setGateOn (bool shouldBeOn);
+    bool isGateOn() const noexcept { return project.gateOn; }
+    float getGateOpenness() { return engine.getAmp().getGate().getOpenness(); }
+    void setBypassed (AmpEngine::Block block, bool bypassed);
+    bool isBypassed (AmpEngine::Block block) const { return engine.getAmp().isBypassed (block); }
 
     //==============================================================================
     // Tempo
@@ -57,7 +65,28 @@ public:
 
     //==============================================================================
     // Transport: a linear timeline, in seconds.
+    // The pedal. From an empty loop it can wait for a count-in (a bar of
+    // clicks) and close by itself after a number of bars; pressing during the
+    // count-in cancels it.
     void recordLoop();
+    void setLoopCountInOn (bool shouldBeOn);
+    bool isLoopCountInOn() const noexcept { return loopCountIn; }
+    void setLoopBars (int bars); // 0: free, closed by hand
+    int getLoopBars() const noexcept { return loopBars; }
+    // Deletes the Looper track along with its loop.
+    void removeLooperTrack();
+
+    // Magnet: a click on the timeline puts the playhead on the grid when it
+    // lands close enough, and leaves it where it is otherwise.
+    void setMagnetOn (bool shouldBeOn);
+    bool isMagnetOn() const noexcept { return magnetOn; }
+
+    // Library entries put aside (captures, songs by file; takes by index):
+    // out of the lists until shown again, never deleted from disk.
+    bool isHiddenInLibrary (const juce::String& kind, const juce::String& key) const;
+    void setHiddenInLibrary (const juce::String& kind, const juce::String& key, bool shouldBeHidden);
+    int countHiddenInLibrary (const juce::String& kind) const;
+    void setTakeHidden (int takeIndex, bool shouldBeHidden);
     void togglePlay();
     void stopAll();
     void returnToStart();
@@ -90,15 +119,30 @@ public:
     double getTakeSeconds() const;
     double getTakeStartSeconds() const; // timeline position of the take being recorded
 
+    // Count-in: a bar of clicks before the take, shown big on the monitor.
+    // The take starts recording with it (the camera too, so it has time to
+    // settle) and its region begins where the count-in ends — bar 2 when
+    // recording from the start, where a song's first bar is.
+    void setCountInOn (bool shouldBeOn);
+    bool isCountInOn() const noexcept { return countInOn; }
+    int getCountInBeatsLeft() const;
+
     //==============================================================================
-    // Tracks: Guitare (the amp + the take regions), Looper, Caméra.
-    enum class Track { amp, loop, camera };
+    // Tracks: Guitare (the amp + the take regions), Looper, Caméra, Morceau.
+    enum class Track { amp, loop, camera, song };
     void setMuted (Track track, bool muted);
     bool isMuted (Track track) const;
     void setSolo (Track track, bool solo);
     bool isSolo (Track track) const;
     void setTrackVolume (Track track, float db);
     float getTrackVolume (Track track) const;
+    void setMasterVolume (float db);
+    float getMasterVolume() const noexcept { return project.masterVolumeDb; }
+
+    // Record arming: ● records the armed tracks — Guitare (the take's
+    // audio, needed for a take) and Vidéo (the camera).
+    void setArmed (Track track, bool armed);
+    bool isArmed (Track track) const;
 
     //==============================================================================
     // Arrangement editing. Every edit goes through applyEdit() so it can be
@@ -130,6 +174,10 @@ public:
     bool isTakeUsed (int takeIndex) const;
 
     bool hasLoop() const;
+    // The Looper track is not there by default: it appears when added by the
+    // player, or as soon as a loop is recorded. It can be removed while empty.
+    bool isLooperTrackVisible() const;
+    void setLooperTrackVisible (bool shouldBeVisible);
     double getLoopLengthSeconds() const;
     // End of the arrangement's content, in seconds (0 when empty).
     double getContentEnd() const;
@@ -147,9 +195,75 @@ public:
     double getTakeLength (int takeIndex) const;
 
     //==============================================================================
+    // Morceau: a backing track to play along with. Imported in the
+    // background (decoded, copied into the project, analysed), then placed so
+    // that its first bar starts on bar 2 — bar 1 is the count-in — with the
+    // project's tempo set to the song's and the metronome off.
+    static bool isSongFile (const juce::File& file);
+    // Re-amping: the take's dry guitar, played again through the amp as it is
+    // set now (capture, EQ, gate, cabinet). Takes recorded before this existed
+    // have no dry file and can't.
+    bool canReampTake (int takeIndex) const;
+    void reampTake (int takeIndex);
+    bool isReamping() const noexcept { return reamping; }
+
+    void importSong (const juce::File& audioFile);
+    // The backing track from a YouTube link: downloads the audio with yt-dlp
+    // (found in the usual Homebrew places), then imports it like any file —
+    // tempo, first bar and parts included.
+    void importSongFromUrl (const juce::String& url);
+    bool isDownloadingSong() const noexcept { return downloadingSong; }
+    static bool isYouTubeUrl (const juce::String& text);
+    bool isImportingSong() const noexcept { return importingSong; }
+    void removeSong();
+    bool hasSong() const noexcept { return project.song.isSet(); }
+    const Song& getSong() const noexcept { return project.song; }
+    double getSongStart() const noexcept { return project.arrangement.songStart; }
+
+    // The song as it plays on the timeline (slowed down: longer). The
+    // stored analysis is in the file's own time.
+    double getSongSpeed() const noexcept { return project.song.speed; }
+    double getSongLength() const noexcept { return project.song.duration / project.song.speed; }
+    double getSongDownbeat() const noexcept { return project.song.firstDownbeat / project.song.speed; }
+    juce::Range<double> getSongSection (int index) const; // from the song's start
+
+    // Practice: slower (50 … 100 %) and/or transposed (±6 semitones),
+    // rendered in the background; the grid follows the slower tempo.
+    void setSongSpeed (double speed);
+    void setSongSemitones (int semitones);
+    bool isRenderingSong() const noexcept { return renderingSong; }
+
+    // Tempo corrections, keeping the first bar on bar 2: ×2, ÷2, or tapped
+    // along (four taps or more, Taper). In the song's own tempo (100 %).
+    void setSongTempo (double bpm);
+    void tapSongTempo();
+    int getTapCount() const noexcept { return (int) taps.size(); }
+    // Moves the song by a few milliseconds against the grid (⌘Z-able).
+    void nudgeSong (double seconds);
+    // Puts the song's first bar back on bar 2.
+    void placeSongOnBar2();
+    // Cycle over one of the song's parts.
+    void cycleSection (int index);
+
+    struct SongMedia
+    {
+        std::shared_ptr<const AudioEngine::SongAudio> audio;    // at the engine's sample rate, as it plays
+        std::shared_ptr<const AudioEngine::SongAudio> original; // the file as is (100 %, no transposition)
+        double sampleRate = 0.0;
+        std::vector<float> peaks; // 100 per second, both channels
+        static constexpr double peaksPerSecond = 100.0;
+    };
+    const SongMedia* getSongMedia() const { return songMedia.audio != nullptr ? &songMedia : nullptr; }
+
+    //==============================================================================
     // Camera
     void openCamera (const juce::String& deviceName);
     void closeCamera();
+    // Monter switches the camera off without forgetting it was on: resume
+    // reopens the same device (no-op when it was not suspended).
+    void suspendCamera();
+    void resumeCamera();
+    bool isCameraSuspended() const noexcept { return cameraSuspended; }
     bool isCameraOpening() const noexcept { return cameraOpening; }
     juce::String getCameraError() const { return cameraError; }
     juce::String getCameraDescription() const;
@@ -180,14 +294,23 @@ public:
         juce::String title;
         bool burnInTitle = false;
         bool mirror = false;
+        bool includeSong = true; // "Guitare seule" for platforms that mute copyrighted music
     };
     bool hasVideoBetween (double start, double end) const;
     void exportClip (const ExportRequest& request, std::function<void (bool ok, juce::String message, juce::File file)> onDone);
     juce::File exportAudio (const ExportRequest& request, juce::String& error);
     bool exportLoopTo (const juce::File& wavFile, juce::String& error);
 
-    // Offline mixdown of [start, end): what the player hears, minus the click.
-    std::vector<float> renderMix (double start, double end, double sampleRate) const;
+    // Offline stereo mixdown of [start, end): what the player hears, minus the click.
+    struct StereoMix
+    {
+        std::vector<float> left, right;
+    };
+    StereoMix renderMix (double start, double end, double sampleRate, bool includeSong = true) const;
+
+    // Correction added to the device's reported round trip (Réglages audio).
+    void setLatencyAdjustmentMs (double ms);
+    double getLatencyAdjustmentMs() const noexcept { return latencyAdjustmentMs; }
 
     //==============================================================================
     // Project
@@ -196,6 +319,8 @@ public:
     bool saveProject();
     bool saveProjectAs (const juce::File& destination);
     juce::String getProjectName() const { return project.name; }
+    // Something changed since the project was last opened or saved.
+    bool hasUnsavedChanges() const noexcept { return modified; }
     bool hasProjectOnDisk() const { return project.getProjectFile().existsAsFile(); }
 
     //==============================================================================
@@ -239,17 +364,29 @@ private:
     bool loadingCapture = false;
     juce::String captureTag;
 
-    std::array<float, 6> knobs {};
+    std::array<float, 7> knobs {};
+    bool armedGuitar = true, armedVideo = true;
     double bpm = 100.0;
     int beatsPerBar = 4;
     bool metronomeOn = false;
 
-    std::array<bool, 3> muted {}, soloed {};
+    std::array<bool, 4> muted {}, soloed {};
+
+    void loadSongMedia();
+    void pushSongToEngine();
+    SongMedia songMedia;
+    bool importingSong = false, renderingSong = false;
+    int songRenderGeneration = 0;
+    void renderSongVariant();
+    int songLoadGeneration = 0;
+    std::vector<double> taps;
 
     bool recordingTake = false, finishingTake = false;
     Take pendingTake;
     double takeStartedAt = 0.0;
     double pendingTakeStart = 0.0;
+    bool countInOn = true;
+    double countInTarget = -1.0; // timeline seconds where the take's region starts
 
     struct EditState
     {
@@ -261,6 +398,10 @@ private:
     int loopGeneration = 0; // bumps when a new loop is recorded: older loop placements no longer apply
     int knownLoopRecordCount = 0;
 
+    bool loopCountIn = true, magnetOn = true;
+    int loopBars = 0;
+    bool downloadingSong = false;
+    bool reamping = false;
     Selection selection = Selection::none;
     int selectedClip = -1;
 
@@ -271,14 +412,21 @@ private:
     bool previewing = false;
     double lastLocateTime = -10.0;
 
-    bool cameraOpening = false;
+    bool cameraOpening = false, cameraSuspended = false;
+    juce::String suspendedCameraDevice;
+    bool modified = false;
+    void markModified() { modified = true; }
     juce::String cameraError;
 
+    // Calibration listening while a take is recorded (no clap needed).
+    bool autoCalibration = false;
+    void startAutoCalibration();
     CalibrationState calibrationState = CalibrationState::idle;
     juce::String calibrationMessage;
     double calibrationStartedAt = 0.0;
     bool calibrated = false;
     double syncLagSeconds = 0.0;
+    double latencyAdjustmentMs = 0.0;
 
     juce::String notice;
     double noticeTime = 0.0;

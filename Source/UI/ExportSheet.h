@@ -46,7 +46,7 @@ private:
     std::unique_ptr<FormatButton> verticalButton, horizontalButton;
     juce::TextEditor titleEditor;
     juce::Slider trimSlider { juce::Slider::TwoValueHorizontal, juce::Slider::NoTextBox };
-    juce::ToggleButton burnInToggle, mirrorToggle;
+    juce::ToggleButton burnInToggle, mirrorToggle, songToggle;
     roadie::ui::PillButton exportButton, audioButton, revealButton;
     roadie::ui::IconButton closeButton { "Close", roadie::icons::Icon::close };
 

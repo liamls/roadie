@@ -4,7 +4,7 @@
 RoadieLookAndFeel::RoadieLookAndFeel()
 {
    #if JUCE_MAC
-    setDefaultSansSerifTypefaceName ("Avenir Next");
+    setDefaultSansSerifTypefaceName (".AppleSystemUIFont");
    #endif
     applyTheme();
 }
@@ -151,15 +151,15 @@ void RoadieLookAndFeel::drawLinearSlider (juce::Graphics& g, int x, int y, int w
     const auto track = juce::Rectangle<float> ((float) x, centreY - 3.0f, (float) width, 6.0f);
 
     g.setColour (surfaceSunken);
-    g.fillRoundedRectangle (track, 3.0f);
+    roadie::theme::fillSquircle (g, track, 3.0f);
     g.setColour (border);
-    g.drawRoundedRectangle (track, 3.0f, 1.0f);
+    roadie::theme::drawSquircle (g, track, 3.0f, 1.0f);
 
     const bool twoValue = style == juce::Slider::TwoValueHorizontal;
     const float from = twoValue ? minSliderPos : (float) x;
     const float to = twoValue ? maxSliderPos : sliderPos;
     g.setColour (slider.isEnabled() ? accent : textFaint);
-    g.fillRoundedRectangle (juce::Rectangle<float> (from, centreY - 3.0f, std::max (0.0f, to - from), 6.0f), 3.0f);
+    roadie::theme::fillSquircle (g, juce::Rectangle<float> (from, centreY - 3.0f, std::max (0.0f, to - from), 6.0f), 3.0f);
 
     // Round handles with a ring of the panel colour, like the knob faces.
     auto drawThumb = [&] (float cx)
@@ -203,9 +203,9 @@ void RoadieLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& b
         baseColour = baseColour.withMultipliedAlpha (0.45f);
 
     g.setColour (baseColour);
-    g.fillRoundedRectangle (bounds, roadie::theme::radiusSm);
+    roadie::theme::fillSquircle (g, bounds, roadie::theme::radiusSm);
     g.setColour (roadie::theme::border);
-    g.drawRoundedRectangle (bounds, roadie::theme::radiusSm, 1.0f);
+    roadie::theme::drawSquircle (g, bounds, roadie::theme::radiusSm, 1.0f);
 }
 
 juce::Font RoadieLookAndFeel::getTextButtonFont (juce::TextButton&, int buttonHeight)
@@ -226,9 +226,9 @@ void RoadieLookAndFeel::drawComboBox (juce::Graphics& g, int width, int height, 
     using namespace roadie::theme;
     const auto bounds = juce::Rectangle<float> (0, 0, (float) width, (float) height).reduced (0.5f);
     g.setColour (surfaceSunken);
-    g.fillRoundedRectangle (bounds, radiusSm);
+    roadie::theme::fillSquircle (g, bounds, radiusSm);
     g.setColour (box.hasKeyboardFocus (true) ? textMuted : border);
-    g.drawRoundedRectangle (bounds, radiusSm, 1.0f);
+    roadie::theme::drawSquircle (g, bounds, radiusSm, 1.0f);
 
     juce::Path arrow;
     const float cx = (float) width - 14.0f, cy = (float) height * 0.5f;
@@ -248,7 +248,7 @@ void RoadieLookAndFeel::positionComboBoxText (juce::ComboBox& box, juce::Label& 
 void RoadieLookAndFeel::fillTextEditorBackground (juce::Graphics& g, int width, int height, juce::TextEditor& editor)
 {
     g.setColour (editor.findColour (juce::TextEditor::backgroundColourId));
-    g.fillRoundedRectangle (juce::Rectangle<float> (0, 0, (float) width, (float) height), roadie::theme::radiusSm);
+    roadie::theme::fillSquircle (g, juce::Rectangle<float> (0, 0, (float) width, (float) height), roadie::theme::radiusSm);
 }
 
 void RoadieLookAndFeel::drawTextEditorOutline (juce::Graphics& g, int width, int height, juce::TextEditor& editor)
@@ -256,7 +256,7 @@ void RoadieLookAndFeel::drawTextEditorOutline (juce::Graphics& g, int width, int
     const auto colour = editor.hasKeyboardFocus (true) ? editor.findColour (juce::TextEditor::focusedOutlineColourId)
                                                        : editor.findColour (juce::TextEditor::outlineColourId);
     g.setColour (colour);
-    g.drawRoundedRectangle (juce::Rectangle<float> (0, 0, (float) width, (float) height).reduced (0.5f), roadie::theme::radiusSm, 1.0f);
+    roadie::theme::drawSquircle (g, juce::Rectangle<float> (0, 0, (float) width, (float) height).reduced (0.5f), roadie::theme::radiusSm, 1.0f);
 }
 
 void RoadieLookAndFeel::drawTickBox (juce::Graphics& g, juce::Component& component, float x, float y, float w, float h,
@@ -267,9 +267,9 @@ void RoadieLookAndFeel::drawTickBox (juce::Graphics& g, juce::Component& compone
     const auto accent = component.findColour (juce::ToggleButton::tickColourId);
 
     g.setColour (ticked ? accent.withAlpha (0.18f) : surfaceSunken);
-    g.fillRoundedRectangle (box, 4.0f);
+    roadie::theme::fillSquircle (g, box, 4.0f);
     g.setColour (ticked ? accent : (shouldDrawButtonAsHighlighted ? textMuted : border));
-    g.drawRoundedRectangle (box, 4.0f, 1.2f);
+    roadie::theme::drawSquircle (g, box, 4.0f, 1.2f);
 
     if (ticked)
     {
@@ -277,7 +277,7 @@ void RoadieLookAndFeel::drawTickBox (juce::Graphics& g, juce::Component& compone
         tick.startNewSubPath (box.getX() + box.getWidth() * 0.22f, box.getCentreY());
         tick.lineTo (box.getX() + box.getWidth() * 0.43f, box.getBottom() - box.getHeight() * 0.25f);
         tick.lineTo (box.getRight() - box.getWidth() * 0.2f, box.getY() + box.getHeight() * 0.25f);
-        g.setColour (isEnabled ? accent : textFaint);
+        g.setColour (isEnabled ? ink (accent) : textFaint);
         g.strokePath (tick, juce::PathStrokeType (1.8f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
     }
 }
@@ -287,9 +287,9 @@ void RoadieLookAndFeel::drawTooltip (juce::Graphics& g, const juce::String& text
     using namespace roadie::theme;
     const auto bounds = juce::Rectangle<float> (0, 0, (float) width, (float) height);
     g.setColour (surfaceRaised);
-    g.fillRoundedRectangle (bounds, 6.0f);
+    roadie::theme::fillSquircle (g, bounds, 6.0f);
     g.setColour (border);
-    g.drawRoundedRectangle (bounds.reduced (0.5f), 6.0f, 1.0f);
+    roadie::theme::drawSquircle (g, bounds.reduced (0.5f), 6.0f, 1.0f);
     g.setColour (roadie::theme::text);
     g.setFont (roadie::fonts::medium (12.0f));
     g.drawFittedText (text, bounds.reduced (10.0f, 4.0f).toNearestInt(), juce::Justification::centredLeft, 3);
@@ -314,5 +314,5 @@ void RoadieLookAndFeel::drawScrollbar (juce::Graphics& g, juce::ScrollBar&, int 
                                        ? juce::Rectangle<float> ((float) x + 3.0f, (float) thumbStartPosition, (float) width - 6.0f, (float) thumbSize)
                                        : juce::Rectangle<float> ((float) thumbStartPosition, (float) y + 3.0f, (float) thumbSize, (float) height - 6.0f);
     g.setColour (roadie::theme::textFaint.withAlpha (isMouseDown ? 0.7f : (isMouseOver ? 0.5f : 0.3f)));
-    g.fillRoundedRectangle (thumb, std::min (thumb.getWidth(), thumb.getHeight()) * 0.5f);
+    roadie::theme::fillSquircle (g, thumb, std::min (thumb.getWidth(), thumb.getHeight()) * 0.5f);
 }

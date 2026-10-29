@@ -9,7 +9,8 @@ juce::String utf8 (const char* text) { return juce::String::fromUTF8 (text); }
 
 double nowSeconds() { return juce::Time::getMillisecondCounterHiRes() * 0.001; }
 
-constexpr Track allTracks[] = { Track::amp, Track::loop, Track::camera };
+// Top to bottom: the video band, then the audio tracks (A1, A2, A3).
+constexpr Track allTracks[] = { Track::camera, Track::amp, Track::loop, Track::song };
 
 juce::Colour accentOf (Track t)
 {
@@ -18,6 +19,7 @@ juce::Colour accentOf (Track t)
         case Track::amp:    return theme::ampAccent;
         case Track::loop:   return theme::loopAccent;
         case Track::camera: return theme::camAccent;
+        case Track::song:   return theme::songAccent;
         default:            return theme::textMuted;
     }
 }
@@ -29,6 +31,7 @@ icons::Icon iconOf (Track t)
         case Track::amp:    return icons::Icon::guitar;
         case Track::loop:   return icons::Icon::loop;
         case Track::camera: return icons::Icon::camera;
+        case Track::song:   return icons::Icon::song;
         default:            return icons::Icon::guitar;
     }
 }
@@ -41,7 +44,8 @@ juce::String nameOf (Track t)
     {
         case Track::amp:    return "Guitare";
         case Track::loop:   return "Looper";
-        case Track::camera: return utf8 ("Cam\xc3\xa9ra");
+        case Track::camera: return utf8 ("Vid\xc3\xa9o");
+        case Track::song:   return "Morceau";
         default:            return "Guitare";
     }
 }
@@ -106,7 +110,7 @@ void drawRegionFrame (juce::Graphics& g, juce::Rectangle<float> r, juce::Colour 
 {
     const float alpha = dim ? 0.45f : 1.0f;
     juce::Path shape;
-    shape.addRoundedRectangle (r, regionRadius);
+    shape.addPath (roadie::theme::squircle (r, regionRadius));
 
     g.setColour (colour.withAlpha ((selected ? 0.26f : 0.15f + 0.05f * hover) * alpha));
     g.fillPath (shape);
@@ -118,11 +122,11 @@ void drawRegionFrame (juce::Graphics& g, juce::Rectangle<float> r, juce::Colour 
     g.restoreState();
 
     g.setColour (colour.withAlpha ((selected ? 1.0f : 0.45f + 0.3f * hover) * alpha));
-    g.drawRoundedRectangle (r.reduced (0.5f), regionRadius, selected ? 1.5f : 1.0f);
+    roadie::theme::drawSquircle (g, r.reduced (0.5f), regionRadius, selected ? 1.5f : 1.0f);
 
     if (name.isNotEmpty() && r.getWidth() > 18.0f)
     {
-        g.setColour (selected && ! dim ? theme::surfaceSunken : theme::text.withAlpha (0.85f * alpha));
+        g.setColour (selected && ! dim ? theme::onAccent : theme::text.withAlpha (0.85f * alpha));
         g.setFont (fonts::semibold (10.0f));
         g.drawText (name, r.withHeight (titleStrip).reduced (6.0f, 0.0f), juce::Justification::centredLeft, true);
     }
@@ -134,7 +138,7 @@ void drawTrimHandle (juce::Graphics& g, juce::Rectangle<float> r, bool left, juc
     const auto bar = left ? r.withWidth (3.0f).reduced (0.0f, 3.0f).translated (1.0f, 0.0f)
                           : r.withLeft (r.getRight() - 3.0f).reduced (0.0f, 3.0f).translated (-1.0f, 0.0f);
     g.setColour (colour.brighter (0.3f));
-    g.fillRoundedRectangle (bar, 1.5f);
+    roadie::theme::fillSquircle (g, bar, 1.5f);
 }
 
 // Chip on a dark pill, readable over thumbnails and grid alike.
@@ -144,94 +148,38 @@ void drawHint (juce::Graphics& g, juce::Rectangle<float> lane, const juce::Strin
     const float w = std::min (lane.getWidth() - 20.0f, juce::GlyphArrangement::getStringWidth (font, text) + 18.0f);
     auto pill = juce::Rectangle<float> (lane.getX() + 10.0f, lane.getCentreY() - 10.0f, w, 20.0f);
     g.setColour (theme::surface.withAlpha (0.9f));
-    g.fillRoundedRectangle (pill, 10.0f);
+    roadie::theme::fillSquircle (g, pill, 10.0f);
     g.setColour (colour.withAlpha (0.4f));
-    g.drawRoundedRectangle (pill.reduced (0.5f), 10.0f, 1.0f);
-    g.setColour (colour);
+    roadie::theme::drawSquircle (g, pill.reduced (0.5f), 10.0f, 1.0f);
+    g.setColour (theme::ink (colour));
     g.setFont (font);
     g.drawText (text, pill.reduced (9.0f, 0.0f), juce::Justification::centredLeft, true);
 }
 } // namespace
 
 //==============================================================================
-// Horizontal fader of a track header: linear in dB, double-click → 0 dB.
-class Timeline::MiniFader : public juce::Component,
-                            public juce::SettableTooltipClient
+// Record-arm toggle of a track header: a red dot, lit when armed.
+class ArmButton : public juce::Button
 {
 public:
-    explicit MiniFader (juce::Colour a) : accent (a)
+    ArmButton() : juce::Button ("Arm")
     {
-        setMouseCursor (juce::MouseCursor::PointingHandCursor);
-        setRepaintsOnMouseActivity (true);
+        setClickingTogglesState (true);
+        setWantsKeyboardFocus (false);
+        setMouseClickGrabsKeyboardFocus (false);
     }
 
-    std::function<void (float)> onChange;
-
-    void setValue (float db)
+    void paintButton (juce::Graphics& g, bool isOver, bool) override
     {
-        if (! juce::approximatelyEqual (db, value))
-        {
-            value = db;
-            updateTooltip();
-            repaint();
-        }
+        auto bounds = getLocalBounds().toFloat().reduced (0.5f);
+        const bool on = getToggleState();
+        g.setColour (on ? theme::rec.withAlpha (0.22f) : theme::text.withAlpha (isOver ? 0.1f : 0.05f));
+        roadie::theme::fillSquircle (g, bounds, 3.0f);
+        g.setColour (on ? theme::rec : theme::border);
+        roadie::theme::drawSquircle (g, bounds.reduced (0.5f), 3.0f, 1.0f);
+        g.setColour (on ? theme::rec : theme::textFaint);
+        g.fillEllipse (bounds.withSizeKeepingCentre (7.0f, 7.0f));
     }
-
-    void paint (juce::Graphics& g) override
-    {
-        auto track = getLocalBounds().toFloat().reduced (5.0f, 0.0f);
-        const float y = track.getCentreY();
-        const float x = track.getX() + proportion() * track.getWidth();
-        const float active = fade.get (isMouseOverOrDragging());
-
-        g.setColour (theme::border);
-        g.fillRoundedRectangle (track.withHeight (3.0f).withCentre ({ track.getCentreX(), y }), 1.5f);
-        g.setColour (accent.withAlpha (0.6f + 0.3f * active));
-        g.fillRoundedRectangle (juce::Rectangle<float> (track.getX(), y - 1.5f, x - track.getX(), 3.0f), 1.5f);
-
-        // 0 dB tick.
-        const float zeroX = track.getX() + toProportion (0.0f) * track.getWidth();
-        g.setColour (theme::textFaint);
-        g.fillRect (juce::Rectangle<float> (zeroX - 0.5f, y + 3.0f, 1.0f, 3.0f));
-
-        const float r = 4.5f + active;
-        g.setColour (theme::text);
-        g.fillEllipse (x - r, y - r, r * 2.0f, r * 2.0f);
-    }
-
-    void mouseDown (const juce::MouseEvent& e) override { dragTo (e.position.x); }
-    void mouseDrag (const juce::MouseEvent& e) override { dragTo (e.position.x); }
-    void mouseDoubleClick (const juce::MouseEvent&) override { set (0.0f); }
-
-private:
-    static constexpr float minDb = -48.0f, maxDb = 6.0f;
-    static float toProportion (float db) { return juce::jlimit (0.0f, 1.0f, (db - minDb) / (maxDb - minDb)); }
-    float proportion() const { return toProportion (value); }
-
-    void dragTo (float x)
-    {
-        const auto track = getLocalBounds().toFloat().reduced (5.0f, 0.0f);
-        float db = minDb + juce::jlimit (0.0f, 1.0f, (x - track.getX()) / track.getWidth()) * (maxDb - minDb);
-        if (std::abs (db) < 0.8f)
-            db = 0.0f; // a small detent at unity
-        set (std::round (db * 2.0f) * 0.5f);
-    }
-
-    void set (float db)
-    {
-        setValue (db);
-        if (onChange)
-            onChange (db);
-    }
-
-    void updateTooltip()
-    {
-        setTooltip ("Volume : " + (value > 0.0f ? juce::String ("+") : juce::String()) + juce::String (value, 1).replaceCharacter ('.', ',') + " dB");
-    }
-
-    juce::Colour accent;
-    float value = 1.0e9f;
-    roadie::ui::HoverFade fade { *this };
 };
 
 //==============================================================================
@@ -240,18 +188,23 @@ class Timeline::TrackHeader : public juce::Component
 public:
     TrackHeader (Timeline& o, Session& s, Track t)
         : track (t), owner (o), session (s),
-          muteButton (false, accentOf (t)), soloButton (true, accentOf (t)), fader (accentOf (t))
+          muteButton (false, accentOf (t)), soloButton (true, accentOf (t)), fader (accentOf (t), roadie::ui::Fader::Orientation::horizontal)
     {
         muteButton.onClick = [this] { session.setMuted (track, muteButton.getToggleState()); };
         soloButton.onClick = [this] { session.setSolo (track, soloButton.getToggleState()); };
-        addAndMakeVisible (muteButton);
+        armButton.onClick = [this] { session.setArmed (track, armButton.getToggleState()); };
 
-        if (track == Track::camera)
+        // Guitare and Vidéo record: they arm (●); the video band has nothing else.
+        if (track == Track::amp || track == Track::camera)
         {
-            muteButton.setTooltip (utf8 ("Couper la cam\xc3\xa9ra pour les prises (audio seul)"));
+            armButton.setTooltip (track == Track::amp ? utf8 ("Armer : \xe2\x97\x8f enregistre une prise de guitare")
+                                                      : utf8 ("Armer : \xe2\x97\x8f filme aussi (d\xc3\xa9sarm\xc3\xa9" "e : audio seul)"));
+            addAndMakeVisible (armButton);
         }
-        else
+
+        if (track != Track::camera)
         {
+            addAndMakeVisible (muteButton);
             addAndMakeVisible (soloButton);
             fader.onChange = [this] (float db) { session.setTrackVolume (track, db); };
             addAndMakeVisible (fader);
@@ -265,11 +218,13 @@ public:
     {
         muteButton.setToggleState (session.isMuted (track), juce::dontSendNotification);
         soloButton.setToggleState (session.isSolo (track), juce::dontSendNotification);
+        armButton.setToggleState (session.isArmed (track), juce::dontSendNotification);
         if (track != Track::camera)
         {
-            fader.setValue (session.getTrackVolume (track));
+            if (! fader.isMouseButtonDown())
+                fader.setValue (session.getTrackVolume (track));
             auto& engine = session.getEngine();
-            meter.setLevel (track == Track::amp ? engine.getGuitarPeak() : engine.getLoopPeak());
+            meter.setLevel (track == Track::amp ? engine.getGuitarPeak() : (track == Track::loop ? engine.getLoopPeak() : engine.getSongPeak()));
         }
 
         const auto text = subtitle();
@@ -286,28 +241,94 @@ public:
         const bool roomy = getHeight() >= 64 && track != Track::camera;
         auto top = roomy ? content.removeFromTop (getHeight() / 2 + 6).withTrimmedTop (8) : content;
 
-        auto toggles = top.removeFromRight (track == Track::camera ? 18 : 38).withSizeKeepingCentre (track == Track::camera ? 18 : 38, 16);
+        // [●] M S from the right edge inwards.
+        const int toggleCount = (track == Track::amp ? 3 : (track == Track::camera ? 1 : 2));
+        auto toggles = top.removeFromRight (toggleCount * 20 - 2).withSizeKeepingCentre (toggleCount * 20 - 2, 16);
+        if (track == Track::amp || track == Track::camera)
+        {
+            armButton.setBounds (toggles.removeFromLeft (18));
+            toggles.removeFromLeft (2);
+        }
         muteButton.setBounds (toggles.removeFromLeft (18));
         toggles.removeFromLeft (2);
         soloButton.setBounds (toggles.removeFromLeft (18));
         labels = top.withTrimmedLeft (34).withTrimmedRight (6);
-        iconArea = top.withWidth (26).withSizeKeepingCentre (26, 26);
+        const int iconSize = getHeight() < 40 ? 18 : 26;
+        iconArea = top.withWidth (26).withSizeKeepingCentre (iconSize, iconSize);
 
         fader.setVisible (roomy);
         meter.setVisible (roomy);
         if (roomy)
         {
             auto bottom = content.withTrimmedBottom (8);
-            fader.setBounds (bottom.removeFromTop (16).withTrimmedLeft (28));
+            fader.setBounds (bottom.removeFromTop (18).withTrimmedLeft (26));
             meter.setBounds (bottom.removeFromTop (5).withTrimmedLeft (33).withTrimmedRight (5));
         }
     }
 
-    void mouseDown (const juce::MouseEvent&) override
+    // The bottom edge sets the track's height (double-click: default).
+    bool onBottomEdge (const juce::MouseEvent& e) const { return e.y >= getHeight() - 5; }
+
+    void mouseMove (const juce::MouseEvent& e) override
     {
+        setMouseCursor (onBottomEdge (e) ? juce::MouseCursor::UpDownResizeCursor : juce::MouseCursor::NormalCursor);
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        resizing = onBottomEdge (e);
+        heightAtDragStart = owner.getTrackHeight (track);
+        if (resizing)
+            return;
         owner.setSelectedTrack (track);
         if (owner.onTrackSelected)
             owner.onTrackSelected (track);
+
+        if (e.mods.isPopupMenu())
+        {
+            juce::PopupMenu menu;
+            auto* timeline = &owner;
+            auto* s = &session;
+            if (track == Track::loop)
+            {
+                menu.addItem ("Effacer la boucle", s->hasLoop(), false, [s] { s->clearLoop(); });
+                menu.addItem ("Supprimer la piste Looper", true, false, [timeline] { timeline->confirmRemoveLooperTrack(); });
+            }
+            else if (track == Track::song)
+            {
+                menu.addItem (utf8 ("Choisir un morceau\xe2\x80\xa6"), ! s->isImportingSong(), false, [timeline] { if (timeline->onImportSong) timeline->onImportSong(); });
+                menu.addItem (utf8 ("Importer depuis YouTube\xe2\x80\xa6"), ! s->isImportingSong() && ! s->isDownloadingSong(), false,
+                              [timeline] { if (timeline->onImportYouTube) timeline->onImportYouTube(); });
+                menu.addItem ("Retirer le morceau", s->hasSong(), false, [s] { s->removeSong(); });
+            }
+            else
+            {
+                return;
+            }
+            menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition());
+        }
+    }
+
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (resizing)
+            owner.setTrackHeight (track, heightAtDragStart + e.getDistanceFromDragStartY());
+    }
+
+    void mouseUp (const juce::MouseEvent&) override
+    {
+        if (resizing && owner.onTrackHeightsChanged)
+            owner.onTrackHeightsChanged();
+        resizing = false;
+    }
+
+    void mouseDoubleClick (const juce::MouseEvent& e) override
+    {
+        if (! onBottomEdge (e))
+            return;
+        owner.setTrackHeight (track, Timeline::defaultTrackHeight (track));
+        if (owner.onTrackHeightsChanged)
+            owner.onTrackHeightsChanged();
     }
 
     void paint (juce::Graphics& g) override
@@ -330,12 +351,17 @@ public:
 
         auto box = iconArea.toFloat();
         g.setColour (accent.withAlpha (active ? 0.24f : 0.15f));
-        g.fillRoundedRectangle (box, 7.0f);
-        icons::draw (g, iconOf (track), box.reduced (6.0f), accent, 1.9f);
+        roadie::theme::fillSquircle (g, box, 7.0f);
+        icons::draw (g, iconOf (track), box.reduced (6.0f), theme::ink (accent), 1.9f);
 
-        auto textArea = labels.toFloat().withSizeKeepingCentre ((float) labels.getWidth(), 30.0f);
         g.setColour (session.isMuted (track) ? textMuted : theme::text);
         g.setFont (fonts::semibold (12.5f));
+        if (getHeight() < 40) // thin strip: the name alone
+        {
+            g.drawText (nameOf (track), labels.toFloat(), juce::Justification::centredLeft, true);
+            return;
+        }
+        auto textArea = labels.toFloat().withSizeKeepingCentre ((float) labels.getWidth(), 30.0f);
         g.drawText (nameOf (track), textArea.removeFromTop (16.0f), juce::Justification::bottomLeft, true);
         g.setColour (textFaint);
         g.setFont (fonts::medium (10.5f));
@@ -376,8 +402,17 @@ private:
                 }
             }
 
+            case Track::song:
+                if (session.isImportingSong())
+                    return utf8 ("Analyse\xe2\x80\xa6");
+                if (! session.hasSong())
+                    return utf8 ("Aucun \xe2\x80\x94 glisse un MP3 ici");
+                return juce::String (session.getSong().bpm, 1).replaceCharacter ('.', ',') + utf8 (" BPM \xc2\xb7 ") + session.getSong().title;
+
             case Track::camera:
             default:
+                if (session.isCameraSuspended())
+                    return utf8 ("Coup\xc3\xa9" "e en Monter");
                 if (! session.getCamera().isOpen())
                     return session.isCameraOpening() ? utf8 ("Ouverture\xe2\x80\xa6") : utf8 ("\xc3\x89teinte");
                 if (session.isMuted (track))
@@ -394,11 +429,70 @@ private:
     Timeline& owner;
     Session& session;
     roadie::ui::MuteSoloButton muteButton, soloButton;
-    MiniFader fader;
+    ArmButton armButton;
+    roadie::ui::Fader fader;
     roadie::ui::Meter meter;
     juce::Rectangle<int> labels, iconArea;
     juce::String shownSubtitle;
+    bool resizing = false;
+    int heightAtDragStart = 0;
     roadie::ui::HoverFade fade { *this };
+};
+
+//==============================================================================
+// Master, under the tracks: the whole output, its fader and a stereo meter.
+class Timeline::MasterHeader : public juce::Component
+{
+public:
+    explicit MasterHeader (Session& s)
+        : session (s), fader (theme::text.withAlpha (0.7f), roadie::ui::Fader::Orientation::horizontal)
+    {
+        fader.onChange = [this] (float db) { session.setMasterVolume (db); };
+        addAndMakeVisible (fader);
+        addAndMakeVisible (left);
+        addAndMakeVisible (right);
+        left.setTooltip (utf8 ("Sortie gauche \xe2\x80\x94 un clic \xc3\xa9teint le t\xc3\xa9moin de saturation"));
+        right.setTooltip (utf8 ("Sortie droite \xe2\x80\x94 un clic \xc3\xa9teint le t\xc3\xa9moin de saturation"));
+    }
+
+    void refresh()
+    {
+        if (! fader.isMouseButtonDown())
+            fader.setValue (session.getMasterVolume());
+        left.setLevel (session.getEngine().getOutputPeakLeft());
+        right.setLevel (session.getEngine().getOutputPeakRight());
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        using namespace theme;
+        g.fillAll (surface);
+        g.setColour (border);
+        g.drawHorizontalLine (0, 0.0f, (float) getWidth());
+        g.setColour (theme::text);
+        g.setFont (fonts::semibold (12.5f));
+        g.drawText ("Master", nameArea, juce::Justification::centredLeft, false);
+    }
+
+    void resized() override
+    {
+        auto area = getLocalBounds().reduced (15, 0);
+        nameArea = area.removeFromLeft (56);
+        auto meters = area.removeFromRight (std::min (64, area.getWidth() / 3)).withSizeKeepingCentre (std::min (64, area.getWidth() / 3), 11);
+        left.setBounds (meters.removeFromTop (5));
+        meters.removeFromTop (1);
+        right.setBounds (meters.removeFromTop (5));
+        area.removeFromRight (8);
+        fader.setBounds (area.withSizeKeepingCentre (area.getWidth(), 18));
+    }
+
+    static constexpr int preferredHeight = 40;
+
+private:
+    Session& session;
+    roadie::ui::Fader fader;
+    roadie::ui::Meter left, right;
+    juce::Rectangle<int> nameArea;
 };
 
 //==============================================================================
@@ -429,7 +523,7 @@ public:
         track = area.reduced (6.0f, 0.0f);
         const float y = track.getCentreY();
         g.setColour (theme::border);
-        g.fillRoundedRectangle (track.withHeight (3.0f).withCentre ({ track.getCentreX(), y }), 1.5f);
+        roadie::theme::fillSquircle (g, track.withHeight (3.0f).withCentre ({ track.getCentreX(), y }), 1.5f);
         const float x = track.getX() + proportion() * track.getWidth();
         g.setColour (colour);
         g.fillEllipse (x - 4.5f, y - 4.5f, 9.0f, 9.0f);
@@ -496,7 +590,7 @@ public:
             auto band = juce::Rectangle<float> (x0, 2.0f, x1 - x0, bandHeight);
             const bool on = session.isCycleOn();
             g.setColour (exportAccent.withAlpha (on ? (hoverBand ? 1.0f : 0.85f) : (hoverBand ? 0.4f : 0.25f)));
-            g.fillRoundedRectangle (band, 3.0f);
+            roadie::theme::fillSquircle (g, band, 3.0f);
         }
         else if (hoverBand)
         {
@@ -577,7 +671,7 @@ public:
         else
         {
             mode = Mode::scrub;
-            session.locate (owner.snap (downTime, ! e.mods.isCommandDown()));
+            session.locate (owner.snapPlayhead (downTime, e.mods.isCommandDown()));
         }
     }
 
@@ -598,7 +692,7 @@ public:
         switch (mode)
         {
             case Mode::scrub:
-                session.locate (owner.snap (t, snapping));
+                session.locate (owner.snapPlayhead (t, ! snapping));
                 break;
             case Mode::cycleCreate:
             {
@@ -689,7 +783,10 @@ public:
                                   (double) session.getTakes().size(), (double) looper.getRecordedLengthSamples(),
                                   (double) looper.getLayerCount(), (double) looper.getState(),
                                   session.isCycleOn() ? 1.0 : 0.0, session.getCycleRange().getStart(), session.getCycleRange().getEnd(),
-                                  session.getCamera().isOpen() ? 1.0 : 0.0 };
+                                  session.getCamera().isOpen() ? 1.0 : 0.0,
+                                  a.songStart, session.getSong().bpm, (double) session.getSong().sections.size(), session.getSongSpeed(),
+                                  (double) session.getSong().semitones, session.isRenderingSong() ? 1.0 : 0.0,
+                                  session.getSongMedia() != nullptr ? 1.0 : 0.0, session.isImportingSong() ? 1.0 : 0.0 };
         for (const auto& c : a.clips)
             sig.insert (sig.end(), { (double) c.take, c.start, c.sourceStart, c.length });
         for (auto t : allTracks)
@@ -714,13 +811,12 @@ public:
 
         const auto& arrangement = drag.active && drag.moved ? drag.edited : session.getArrangement();
 
-        for (int i = 0; i < 3; ++i)
+        for (auto t : allTracks)
         {
-            const auto lane = laneBounds (allTracks[i]);
-            if (owner.getSelectedTrack() == allTracks[i])
+            if (owner.getSelectedTrack() == t)
             {
                 g.setColour (text.withAlpha (0.025f));
-                g.fillRect (lane);
+                g.fillRect (laneBounds (t));
             }
         }
 
@@ -731,18 +827,19 @@ public:
             const auto cycle = session.getCycleRange();
             const float x0 = owner.timeToX (cycle.getStart()), x1 = owner.timeToX (cycle.getEnd());
             g.setColour (exportAccent.withAlpha (0.05f));
-            g.fillRect (juce::Rectangle<float> (x0, 0.0f, x1 - x0, laneBounds (Track::camera).getBottom()));
+            g.fillRect (juce::Rectangle<float> (x0, 0.0f, x1 - x0, (float) owner.lanesBottom()));
         }
 
-        for (int i = 0; i < 3; ++i)
+        for (auto t : allTracks)
         {
             g.setColour (border);
-            g.drawHorizontalLine ((int) laneBounds (allTracks[i]).getBottom() - 1, 0.0f, bounds.getRight());
+            g.drawHorizontalLine ((int) laneBounds (t).getBottom() - 1, 0.0f, bounds.getRight());
         }
 
+        paintCamera (g, arrangement);
         paintGuitar (g, arrangement);
         paintLoop (g, arrangement);
-        paintCamera (g, arrangement);
+        paintSong (g, arrangement);
     }
 
     //==============================================================================
@@ -755,8 +852,9 @@ public:
             setHover (hit);
             repaint();
         }
-        setMouseCursor (hit.zone == Zone::body || hit.kind == Kind::none ? juce::MouseCursor::NormalCursor
-                                                                          : juce::MouseCursor::LeftRightResizeCursor);
+        setMouseCursor (hit.kind == Kind::section ? juce::MouseCursor::PointingHandCursor
+                        : hit.zone == Zone::body || hit.kind == Kind::none ? juce::MouseCursor::NormalCursor
+                                                                           : juce::MouseCursor::LeftRightResizeCursor);
     }
 
     void mouseExit (const juce::MouseEvent&) override
@@ -795,10 +893,24 @@ public:
             return;
         }
 
+        // A part of the song: cycle over it (again: cycle off).
+        if (hit.kind == Kind::section)
+        {
+            session.cycleSection (hit.index);
+            return;
+        }
+
+        // Any other click in the lanes puts the playhead there (a region is
+        // selected and dragged all the same).
+        if (! session.isRecordingTake())
+            session.locate (owner.snapPlayhead (owner.xToTime (e.position.x), e.mods.isCommandDown()));
+
         if (hit.kind == Kind::none)
         {
             if (lane == Track::camera && ! session.getCamera().isOpen() && owner.onCameraClicked)
                 owner.onCameraClicked();
+            if (lane == Track::song && ! session.hasSong() && ! session.isImportingSong() && owner.onImportSong)
+                owner.onImportSong();
             return;
         }
 
@@ -862,6 +974,12 @@ public:
             else
                 edited.clips[(size_t) drag.hit.index] = clip;
         }
+        else if (drag.hit.kind == Kind::song)
+        {
+            // The grid catches the song's first bar, not its first sample.
+            const double downbeat = session.getSongDownbeat();
+            edited.songStart = owner.snap (drag.origin.songStart + downbeat + dt, snapping) - downbeat;
+        }
         else if (drag.hit.kind == Kind::loop)
         {
             const auto& o = drag.origin;
@@ -897,7 +1015,8 @@ public:
         if (drag.active && drag.moved && drag.edited != drag.origin)
         {
             const bool clip = drag.hit.kind == Kind::clip;
-            const auto name = drag.duplicate ? utf8 ("Dupliquer la r\xc3\xa9gion")
+            const auto name = drag.hit.kind == Kind::song ? utf8 ("D\xc3\xa9placer le morceau")
+                              : drag.duplicate ? utf8 ("Dupliquer la r\xc3\xa9gion")
                               : drag.hit.zone == Zone::body ? (clip ? utf8 ("D\xc3\xa9placer la r\xc3\xa9gion") : utf8 ("D\xc3\xa9placer la boucle"))
                                                             : (clip ? utf8 ("Rogner la r\xc3\xa9gion") : utf8 ("Rogner la boucle"));
             const auto edited = drag.edited;
@@ -914,11 +1033,11 @@ public:
     void mouseDoubleClick (const juce::MouseEvent& e) override
     {
         if (hitTestAt (e.position).kind == Kind::none)
-            session.locate (owner.snap (owner.xToTime (e.position.x), ! e.mods.isCommandDown()));
+            session.locate (owner.snapPlayhead (owner.xToTime (e.position.x), e.mods.isCommandDown()));
     }
 
 private:
-    enum class Kind { none, clip, loop };
+    enum class Kind { none, clip, loop, song, section };
     enum class Zone { body, left, right };
 
     struct Hit
@@ -932,9 +1051,7 @@ private:
 
     juce::Rectangle<float> laneBounds (Track t) const
     {
-        const int i = t == Track::amp ? 0 : (t == Track::loop ? 1 : 2);
-        const int h = owner.getRowHeight();
-        return { 0.0f, (float) (i * h), (float) getWidth(), (float) h };
+        return { 0.0f, (float) owner.rowTop (t), (float) getWidth(), (float) owner.rowHeightOf (t) };
     }
 
     std::optional<Track> laneAt (float y) const
@@ -978,6 +1095,20 @@ private:
         };
 
         const auto& a = session.getArrangement();
+        if (*lane == Track::song)
+        {
+            if (! session.hasSong())
+                return {};
+            const auto r = songBounds (a);
+            if (! r.contains (p))
+                return {};
+            // The part chips along the top.
+            if (p.y < r.getY() + titleStrip)
+                for (int i = 0; i < (int) session.getSong().sections.size(); ++i)
+                    if (sectionChip (a, i).contains (p))
+                        return { Kind::section, i, Zone::body };
+            return { Kind::song, -1, Zone::body };
+        }
         if (*lane == Track::amp || *lane == Track::camera)
         {
             // Topmost first: later regions play (and draw) over earlier ones.
@@ -1007,7 +1138,7 @@ private:
         while (bar * pps * every < 16.0)
             every *= 2;
         const bool beats = beat * pps >= 14.0;
-        const float bottom = laneBounds (Track::camera).getBottom();
+        const float bottom = (float) owner.lanesBottom();
 
         const double t0 = owner.xToTime (0.0f), t1 = owner.xToTime (bounds.getWidth());
         for (int b = std::max (0, (int) std::floor (t0 / bar)); b * bar <= t1; ++b)
@@ -1213,7 +1344,7 @@ private:
             return;
 
         juce::Path clip;
-        clip.addRoundedRectangle (area, 3.0f);
+        clip.addPath (roadie::theme::squircle (area, 3.0f));
         g.saveState();
         g.reduceClipRegion (clip);
 
@@ -1298,6 +1429,109 @@ private:
         g.restoreState();
     }
 
+    juce::Rectangle<float> songBounds (const Arrangement& a) const
+    {
+        return regionBounds (Track::song, a.songStart, a.songStart + std::max (0.1, session.getSongLength()));
+    }
+
+    // The chip of part `index` in the song's title strip.
+    juce::Rectangle<float> sectionChip (const Arrangement& a, int index) const
+    {
+        const auto& sections = session.getSong().sections;
+        const auto r = songBounds (a);
+        const auto range = session.getSongSection (index);
+        const float x0 = std::max (r.getX(), owner.timeToX (a.songStart + range.getStart()));
+        const float x1 = std::min (r.getRight(), owner.timeToX (a.songStart + range.getEnd()));
+        const auto font = fonts::semibold (10.0f);
+        const float w = std::min (x1 - x0 - 2.0f, juce::GlyphArrangement::getStringWidth (font, sections[(size_t) index].label) + 14.0f);
+        return { x0 + 2.0f, r.getY() + 1.0f, std::max (0.0f, w), titleStrip - 2.0f };
+    }
+
+    void paintSong (juce::Graphics& g, const Arrangement& arrangement)
+    {
+        const auto lane = laneBounds (Track::song);
+        const auto colour = theme::songAccent;
+
+        g.saveState();
+        g.reduceClipRegion (lane.toNearestInt());
+
+        if (! session.hasSong())
+        {
+            drawHint (g, lane, session.isImportingSong() ? utf8 ("Analyse du morceau\xe2\x80\xa6")
+                                                         : utf8 ("Pas de morceau \xe2\x80\x94 glisse un MP3, M4A ou WAV, ou clique ici"),
+                      colour);
+            g.restoreState();
+            return;
+        }
+
+        const auto& song = session.getSong();
+        const auto r = songBounds (arrangement);
+        const bool muted = session.isMuted (Track::song);
+        drawRegionFrame (g, r, colour, {}, false, hover.kind == Kind::song ? 1.0f : 0.0f, muted);
+
+        // Part boundaries and chips; the one cycling is lit.
+        const auto cycle = session.getCycleRange();
+        for (int i = 0; i < (int) song.sections.size(); ++i)
+        {
+            const auto& section = song.sections[(size_t) i];
+            const auto range = session.getSongSection (i);
+            const float x = owner.timeToX (arrangement.songStart + range.getStart());
+            if (i > 0 && x > r.getX() && x < r.getRight())
+            {
+                g.setColour (colour.withAlpha (0.5f));
+                g.fillRect (juce::Rectangle<float> (x - 0.5f, r.getY(), 1.0f, r.getHeight()));
+            }
+            const auto chip = sectionChip (arrangement, i);
+            if (chip.getWidth() < 10.0f)
+                continue;
+            const bool cycling = session.isCycleOn() && std::abs (cycle.getStart() - std::max (0.0, arrangement.songStart + range.getStart())) < 0.01
+                                 && std::abs (cycle.getEnd() - (arrangement.songStart + range.getEnd())) < 0.01;
+            const bool hovered = hover.kind == Kind::section && hover.index == i;
+            g.setColour (cycling ? theme::exportAccent : colour.withAlpha (hovered ? 0.85f : 0.55f));
+            roadie::theme::fillSquircle (g, chip, 4.0f);
+            g.setColour (cycling || hovered ? theme::onAccent : theme::text);
+            g.setFont (fonts::semibold (10.0f));
+            g.drawText (section.label, chip.reduced (5.0f, 0.0f), juce::Justification::centredLeft, true);
+        }
+
+        // The title after the chips when there is room, else at the right.
+        const auto body = r.withTrimmedTop (titleStrip);
+        if (const auto* media = session.getSongMedia())
+        {
+            drawWaveform (g, body.reduced (1.0f, 3.0f), getLocalBounds().toFloat(), [&] (float x0, float x1)
+            {
+                const double a = owner.xToTime (x0) - arrangement.songStart, b = owner.xToTime (x1) - arrangement.songStart;
+                const auto p0 = (size_t) std::max (0.0, a * Session::SongMedia::peaksPerSecond);
+                const auto p1 = std::min (media->peaks.size(), (size_t) std::max (0.0, std::ceil (b * Session::SongMedia::peaksPerSecond)));
+                float peak = 0.0f;
+                for (auto p = p0; p < std::max (p1, p0 + 1) && p < media->peaks.size(); ++p)
+                    peak = std::max (peak, media->peaks[p]);
+                return peak;
+            }, colour.withMultipliedAlpha (muted ? 0.5f : 1.0f));
+        }
+
+        if (body.getHeight() > 16.0f)
+        {
+            auto label = song.title + utf8 (" \xc2\xb7 ") + juce::String (song.bpm * song.speed, 1).replaceCharacter ('.', ',') + " BPM";
+            if (song.speed < 0.999)
+                label << utf8 (" \xc2\xb7 ") << juce::roundToInt (song.speed * 100.0) << utf8 ("\xc2\xa0%");
+            if (song.semitones != 0)
+                label << utf8 (" \xc2\xb7 ") << (song.semitones > 0 ? "+" : "") << song.semitones << " dt";
+            if (session.isRenderingSong())
+                label << utf8 (" \xc2\xb7 calcul\xe2\x80\xa6");
+            const auto font = fonts::semibold (10.5f);
+            const float w = juce::GlyphArrangement::getStringWidth (font, label) + 14.0f;
+            auto pill = juce::Rectangle<float> (std::max (r.getX(), 0.0f) + 6.0f, body.getBottom() - 18.0f, w, 15.0f);
+            g.setColour (theme::surfaceSunken.withAlpha (0.75f));
+            roadie::theme::fillSquircle (g, pill, 7.5f);
+            g.setColour (theme::text);
+            g.setFont (font);
+            g.drawText (label, pill.reduced (7.0f, 0.0f), juce::Justification::centredLeft, true);
+        }
+
+        g.restoreState();
+    }
+
     bool isClipSelected (int index) const
     {
         if (drag.active && drag.moved && drag.duplicate)
@@ -1327,6 +1561,7 @@ private:
             item (utf8 ("Couper \xc3\xa0 la t\xc3\xaate de lecture"), utf8 ("\xe2\x8c\x98T"), playhead > c.start + 0.05 && playhead < c.end() - 0.05,
                   [s] { s->splitAtPlayhead(); });
             item ("Dupliquer", utf8 ("\xe2\x8c\x98" "D"), true, [s] { s->duplicateSelection(); });
+            item (utf8 ("R\xc3\xa9-amplifier avec l'ampli actuel"), {}, s->canReampTake (c.take), [s, c] { s->reampTake (c.take); });
             item ("Supprimer", utf8 ("\xe2\x8c\xab"), true, [s] { s->deleteSelection(); });
             menu.addSeparator();
             item (utf8 ("Cr\xc3\xa9" "er un cycle sur la r\xc3\xa9gion"), {}, true, [s, c] { s->setCycleRange (c.start, c.end()); s->setCycleOn (true); });
@@ -1353,10 +1588,32 @@ private:
             item (utf8 ("Exporter cette r\xc3\xa9gion\xe2\x80\xa6"), {}, true, [timeline] { if (timeline->onExportRequested) timeline->onExportRequested(); });
             menu.addSeparator();
             item ("Effacer la boucle", utf8 ("\xe2\x87\xa7\xe2\x8c\xab"), true, [s] { s->clearLoop(); });
+            item ("Supprimer la piste Looper", {}, true, [timeline] { timeline->confirmRemoveLooperTrack(); });
+        }
+        else if (hit.kind == Kind::song || hit.kind == Kind::section || (lane == Track::song && session.hasSong()))
+        {
+            const double songBpm = session.getSong().bpm;
+            item (utf8 ("Tempo \xc3\x97" "2 (") + juce::String (songBpm * 2.0, 1).replaceCharacter ('.', ',') + " BPM)", {}, songBpm * 2.0 <= 240.0,
+                  [s, songBpm] { s->setSongTempo (songBpm * 2.0); });
+            item (utf8 ("Tempo \xc3\xb7" "2 (") + juce::String (songBpm / 2.0, 1).replaceCharacter ('.', ',') + " BPM)", {}, songBpm / 2.0 >= 40.0,
+                  [s, songBpm] { s->setSongTempo (songBpm / 2.0); });
+            item (utf8 ("Caler la premi\xc3\xa8re mesure sur la mesure 2"), {}, true, [s] { s->placeSongOnBar2(); });
+            menu.addSeparator();
+            if (hit.kind == Kind::section)
+                item (utf8 ("R\xc3\xa9p\xc3\xa9ter cette partie"), "", true, [s, index = hit.index] { s->cycleSection (index); });
+            item (utf8 ("Remplacer le morceau\xe2\x80\xa6"), {}, true, [timeline] { if (timeline->onImportSong) timeline->onImportSong(); });
+            item (utf8 ("Remplacer par un lien YouTube\xe2\x80\xa6"), {}, ! session.isDownloadingSong(), [timeline] { if (timeline->onImportYouTube) timeline->onImportYouTube(); });
+            item ("Retirer le morceau", {}, true, [s] { s->removeSong(); });
         }
         else
         {
-            if (lane != Track::loop)
+            if (lane == Track::song)
+            {
+                item (utf8 ("Choisir un morceau\xe2\x80\xa6"), {}, ! session.isImportingSong(), [timeline] { if (timeline->onImportSong) timeline->onImportSong(); });
+                item (utf8 ("Importer depuis YouTube\xe2\x80\xa6"), {}, ! session.isImportingSong() && ! session.isDownloadingSong(),
+                      [timeline] { if (timeline->onImportYouTube) timeline->onImportYouTube(); });
+            }
+            if (lane != Track::loop && lane != Track::song)
             {
                 juce::PopupMenu takesMenu;
                 const auto& takes = session.getTakes();
@@ -1369,6 +1626,10 @@ private:
             }
             item (utf8 ("Placer la t\xc3\xaate de lecture ici"), {}, ! session.isRecordingTake(), [s, clickedTime] { s->locate (clickedTime); });
         }
+
+        menu.addSeparator();
+        item (session.isMagnetOn() ? utf8 ("\xe2\x9c\x93 Aimant de la t\xc3\xaate de lecture") : utf8 ("Aimant de la t\xc3\xaate de lecture"), {}, true,
+              [s] { s->setMagnetOn (! s->isMagnetOn()); });
 
         menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition());
     }
@@ -1448,205 +1709,6 @@ private:
 //==============================================================================
 // Floating monitor: the live camera (DIRECT), or the arrangement's video
 // under the playhead while it plays back or right after a locate (LECTURE).
-class Timeline::CameraMonitor : public juce::Component,
-                                public juce::SettableTooltipClient
-{
-public:
-    CameraMonitor (Timeline& o, Session& s) : owner (o), session (s)
-    {
-        constrainer.setMinimumOnscreenAmounts (0xffffff, 0xffffff, 0xffffff, 0xffffff);
-        setSize (smallWidth, heightFor (smallWidth));
-        setTooltip (utf8 ("Glisse la barre pour d\xc3\xa9placer \xc2\xb7 double-clic pour agrandir"));
-        shadower.setOwner (this);
-    }
-
-    void refresh()
-    {
-        const int frame = session.getCamera().getFrameCounter();
-        const int previewFrame = session.getPreviewFrameCounter();
-        const bool previewing = session.isPreviewingArrangement();
-        if (frame != lastFrame || previewFrame != lastPreviewFrame || previewing != wasPreviewing
-            || session.isRecordingTake() || session.isCameraOpening())
-        {
-            lastFrame = frame;
-            lastPreviewFrame = previewFrame;
-            wasPreviewing = previewing;
-            repaint();
-        }
-    }
-
-    void mouseDown (const juce::MouseEvent& e) override
-    {
-        if (e.y <= barHeight)
-            dragger.startDraggingComponent (this, e);
-        else if (! session.getCamera().isOpen() && owner.onCameraClicked)
-            owner.onCameraClicked();
-    }
-
-    void mouseDrag (const juce::MouseEvent& e) override
-    {
-        if (e.mouseDownPosition.y <= barHeight)
-            dragger.dragComponent (this, e, &constrainer);
-    }
-
-    void mouseDoubleClick (const juce::MouseEvent&) override
-    {
-        const int newWidth = getWidth() == smallWidth ? largeWidth : smallWidth;
-        const auto bottomRight = getBounds().getBottomRight();
-        setBounds (juce::Rectangle<int> (newWidth, heightFor (newWidth)).withBottomY (bottomRight.y).withRightX (bottomRight.x));
-        keepInside();
-    }
-
-    void mouseMove (const juce::MouseEvent& e) override
-    {
-        setMouseCursor (e.y <= barHeight ? juce::MouseCursor::DraggingHandCursor
-                                         : (session.getCamera().isOpen() ? juce::MouseCursor::NormalCursor : juce::MouseCursor::PointingHandCursor));
-    }
-
-    void keepInside()
-    {
-        if (auto* parent = getParentComponent())
-        {
-            auto area = parent->getLocalBounds().withTrimmedTop (rulerHeight).withTrimmedLeft (owner.getHeaderWidth()).withTrimmedBottom (scrollbarHeight);
-            setBounds (getBounds().constrainedWithin (area));
-        }
-    }
-
-    void paint (juce::Graphics& g) override
-    {
-        using namespace theme;
-        auto bounds = getLocalBounds().toFloat();
-        const bool previewing = session.isPreviewingArrangement();
-
-        juce::Path card;
-        card.addRoundedRectangle (bounds, radiusMd);
-        g.setColour (surface);
-        g.fillPath (card);
-
-        g.saveState();
-        g.reduceClipRegion (card);
-
-        // Title bar, with the source on the right.
-        auto bar = bounds.removeFromTop ((float) barHeight);
-        g.setColour (camAccent.withAlpha (0.16f));
-        g.fillRect (bar);
-        auto barContent = bar.reduced (8.0f, 0.0f);
-        icons::draw (g, icons::Icon::camera, barContent.removeFromLeft (10.0f).withSizeKeepingCentre (10.0f, 10.0f), camAccent, 2.5f);
-        barContent.removeFromLeft (5.0f);
-
-        const auto badge = previewing ? juce::String ("LECTURE") : juce::String ("DIRECT");
-        const auto badgeColour = previewing ? loopAccent : (session.isRecordingTake() ? rec : camAccent);
-        const auto badgeFont = fonts::display (9.0f).withExtraKerningFactor (0.06f);
-        const float badgeWidth = juce::GlyphArrangement::getStringWidth (badgeFont, badge) + 12.0f;
-        auto badgeArea = barContent.removeFromRight (badgeWidth).withSizeKeepingCentre (badgeWidth, 14.0f);
-        g.setColour (badgeColour.withAlpha (0.2f));
-        g.fillRoundedRectangle (badgeArea, 7.0f);
-        g.setColour (badgeColour);
-        g.setFont (badgeFont);
-        g.drawText (badge, badgeArea, juce::Justification::centred, false);
-
-        g.setColour (camAccent);
-        g.setFont (fonts::display (10.0f).withExtraKerningFactor (0.04f));
-        g.drawText (utf8 ("CAM\xc3\x89RA"), barContent, juce::Justification::centredLeft, false);
-
-        // Picture.
-        auto preview = bounds;
-        auto& camera = session.getCamera();
-        const auto image = previewing ? session.getPreviewFrame() : (camera.isOpen() ? camera.getLatestFrame() : juce::Image());
-
-        if (image.isValid())
-        {
-            g.saveState();
-            // Live is mirrored, like a selfie view; playback shows the movie as it will be exported.
-            if (! previewing)
-                g.addTransform (juce::AffineTransform::scale (-1.0f, 1.0f, preview.getCentreX(), 0.0f));
-            g.drawImage (image, preview, juce::RectanglePlacement::fillDestination);
-            g.restoreState();
-        }
-        else
-        {
-            g.setGradientFill (juce::ColourGradient (juce::Colour (0xff1d1828), preview.getX(), preview.getY(),
-                                                     juce::Colour (0xff0e0c13), preview.getRight(), preview.getBottom(), false));
-            g.fillRect (preview);
-            g.setGradientFill (juce::ColourGradient (camAccent.withAlpha (0.25f), preview.getX() + preview.getWidth() * 0.32f, preview.getY() + preview.getHeight() * 0.3f,
-                                                     camAccent.withAlpha (0.0f), preview.getX() + preview.getWidth() * 0.8f, preview.getBottom(), true));
-            g.fillRect (preview);
-
-            // The preview is a dark "screen" in both themes: fixed light text.
-            g.setColour (juce::Colour (0xffb9b5ad));
-            g.setFont (fonts::semibold (11.0f));
-            const auto message = previewing ? utf8 ("Pas de vid\xc3\xa9o ici")
-                                 : session.isCameraOpening() ? utf8 ("Ouverture de la cam\xc3\xa9ra\xe2\x80\xa6")
-                                 : session.getCameraError().isNotEmpty() ? session.getCameraError()
-                                 : CameraCapture::isSupported() ? utf8 ("Cam\xc3\xa9ra \xc3\xa9teinte \xe2\x80\x94 clique pour l'activer")
-                                                                : utf8 ("Cam\xc3\xa9ra indisponible sur ce syst\xc3\xa8me");
-            g.drawFittedText (message, preview.reduced (12.0f).toNearestInt(), juce::Justification::centred, 4);
-        }
-
-        // Framing guides (live only: they help placing yourself).
-        if (! previewing)
-        {
-            const auto guides = preview.reduced (preview.getWidth() * 0.09f, preview.getHeight() * 0.09f);
-            juce::Path guidePath;
-            guidePath.addRoundedRectangle (guides, 6.0f);
-            juce::Path dashed;
-            const float dashes[] = { 4.0f, 4.0f };
-            juce::PathStrokeType (1.0f).createDashedStroke (dashed, guidePath, dashes, 2);
-            g.setColour (text.withAlpha (0.18f));
-            g.fillPath (dashed);
-        }
-
-        // REC indicator.
-        if (session.isRecordingTake())
-        {
-            const bool blinkOn = (juce::Time::getMillisecondCounter() / 700) % 2 == 0;
-            auto recArea = juce::Rectangle<float> (preview.getX() + 7.0f, preview.getY() + 7.0f, 90.0f, 12.0f);
-            g.setColour (rec.withAlpha (blinkOn ? 1.0f : 0.25f));
-            g.fillEllipse (recArea.removeFromLeft (6.0f).withSizeKeepingCentre (6.0f, 6.0f));
-            recArea.removeFromLeft (5.0f);
-            g.setColour (rec);
-            g.setFont (fonts::display (10.0f));
-            fonts::drawTabular (g, "REC " + formatDuration (session.getTakeSeconds()), recArea, juce::Justification::centredLeft);
-        }
-
-        // Sync pill.
-        if (camera.isOpen() && ! previewing)
-        {
-            const auto ms = juce::roundToInt (session.getSyncLagMs());
-            const auto label = session.isCalibrated() ? utf8 ("Sync ") + (ms >= 0 ? "+" : "") + juce::String (ms) + " ms"
-                                                      : utf8 ("Sync non calibr\xc3\xa9" "e");
-            const auto font = fonts::display (9.5f);
-            const float w = juce::GlyphArrangement::getStringWidth (font, label) + 14.0f;
-            auto pill = juce::Rectangle<float> (preview.getRight() - 7.0f - w, preview.getBottom() - 7.0f - 17.0f, w, 17.0f);
-            g.setColour (juce::Colour (0xff0e0c13).withAlpha (0.7f));
-            g.fillRoundedRectangle (pill, 8.5f);
-            g.setColour (session.isCalibrated() ? camAccent : warn);
-            g.setFont (font);
-            g.drawText (label, pill, juce::Justification::centred, false);
-        }
-
-        g.restoreState();
-
-        g.setColour (previewing ? loopAccent.withAlpha (0.8f) : camAccent);
-        g.drawRoundedRectangle (getLocalBounds().toFloat().reduced (0.5f), radiusMd, 1.0f);
-    }
-
-    static int heightFor (int width) { return barHeight + width * 9 / 16; }
-
-    static constexpr int smallWidth = 208;
-    static constexpr int largeWidth = 360;
-    static constexpr int barHeight = 22;
-
-private:
-    Timeline& owner;
-    Session& session;
-    juce::ComponentDragger dragger;
-    juce::ComponentBoundsConstrainer constrainer;
-    juce::DropShadower shadower { juce::DropShadow (juce::Colours::black.withAlpha (0.6f), 24, { 0, 10 }) };
-    int lastFrame = -1, lastPreviewFrame = -1;
-    bool wasPreviewing = false;
-};
-
 //==============================================================================
 Timeline::Timeline (Session& s) : session (s)
 {
@@ -1656,12 +1718,20 @@ Timeline::Timeline (Session& s) : session (s)
         addAndMakeVisible (*headers.back());
     }
 
+    master = std::make_unique<MasterHeader> (session);
+    addAndMakeVisible (*master);
+
     zoom = std::make_unique<ZoomControl> (*this);
     addAndMakeVisible (*zoom);
     ruler = std::make_unique<Ruler> (*this, session);
     addAndMakeVisible (*ruler);
     arrange = std::make_unique<ArrangeView> (*this, session);
     addAndMakeVisible (*arrange);
+
+    addLooperButton.setFontSize (12.0f);
+    addLooperButton.setTooltip (utf8 ("Ajoute une piste Looper au projet"));
+    addLooperButton.onClick = [this] { session.setLooperTrackVisible (true); };
+    addAndMakeVisible (addLooperButton);
 
     scrollbar.setAutoHide (false);
     scrollbar.addListener (this);
@@ -1680,14 +1750,74 @@ Timeline::Timeline (Session& s) : session (s)
             onHeaderWidthChanged (headerWidth);
     };
     addAndMakeVisible (headerSplitter);
-
-    monitor = std::make_unique<CameraMonitor> (*this, session);
-    addAndMakeVisible (*monitor);
 }
 
 Timeline::~Timeline()
 {
     scrollbar.removeListener (this);
+}
+
+void Timeline::confirmRemoveLooperTrack()
+{
+    if (! session.hasLoop() && session.getEngine().getLooper().getState() == Looper::State::Empty)
+    {
+        session.removeLooperTrack();
+        return;
+    }
+    auto* s = &session;
+    juce::AlertWindow::showAsync (juce::MessageBoxOptions::makeOptionsOkCancel (
+                                      juce::MessageBoxIconType::WarningIcon, utf8 ("Supprimer la piste Looper ?"),
+                                      utf8 ("La boucle enregistr\xc3\xa9" "e sur cette piste sera effac\xc3\xa9" "e."), "Supprimer", "Annuler", this),
+                                  [s] (int result)
+                                  {
+                                      if (result == 1)
+                                          s->removeLooperTrack();
+                                  });
+}
+
+bool Timeline::isShown (Track track) const
+{
+    return track != Track::loop || session.isLooperTrackVisible();
+}
+
+int Timeline::rowTop (Track track) const noexcept { return rowTops[(size_t) track]; }
+int Timeline::rowHeightOf (Track track) const noexcept { return rowHeights[(size_t) track]; }
+int Timeline::lanesBottom() const noexcept { return rowTop (Track::song) + rowHeightOf (Track::song); }
+
+void Timeline::setTrackHeight (Track track, int height)
+{
+    trackHeights[(size_t) track] = juce::jlimit (20, 320, height);
+    resized();
+    repaint();
+}
+
+int Timeline::getTrackHeight (Track track) const { return trackHeights[(size_t) track]; }
+
+void Timeline::zoomTracks (float factor)
+{
+    for (auto& h : trackHeights)
+        h = juce::jlimit (20, 320, juce::roundToInt ((float) h * factor));
+    resized();
+    repaint();
+    if (onTrackHeightsChanged)
+        onTrackHeightsChanged();
+}
+
+juce::String Timeline::getTrackHeightsState() const
+{
+    juce::StringArray parts;
+    for (auto h : trackHeights)
+        parts.add (juce::String (h));
+    return parts.joinIntoString (",");
+}
+
+void Timeline::setTrackHeightsState (const juce::String& state)
+{
+    const auto parts = juce::StringArray::fromTokens (state, ",", {});
+    if (parts.size() == (int) trackHeights.size())
+        for (size_t i = 0; i < trackHeights.size(); ++i)
+            trackHeights[i] = juce::jlimit (20, 320, parts[(int) i].getIntValue());
+    resized();
 }
 
 void Timeline::setHeaderWidth (int width)
@@ -1703,8 +1833,7 @@ void Timeline::setHeaderWidth (int width)
 
 juce::Point<int> Timeline::getLanePoint (Track track, double seconds) const
 {
-    const int index = track == Track::amp ? 0 : (track == Track::loop ? 1 : 2);
-    return { headerWidth + juce::roundToInt (timeToX (seconds)), rulerHeight + index * rowHeight + rowHeight / 2 };
+    return { headerWidth + juce::roundToInt (timeToX (seconds)), rulerHeight + rowTop (track) + rowHeightOf (track) / 2 };
 }
 
 juce::Point<int> Timeline::getRulerPoint (double seconds, bool cycleBand) const
@@ -1734,6 +1863,16 @@ double Timeline::getGridStep() const
     while (step * pixelsPerSecond < 14.0)
         step *= 2.0;
     return step;
+}
+
+double Timeline::snapPlayhead (double seconds, bool freely) const
+{
+    seconds = std::max (0.0, seconds);
+    if (freely || ! session.isMagnetOn())
+        return seconds;
+    const double step = getGridStep();
+    const double nearest = std::round (seconds / step) * step;
+    return std::abs (nearest - seconds) * pixelsPerSecond <= 9.0 ? std::max (0.0, nearest) : seconds;
 }
 
 double Timeline::snap (double seconds, bool enabled) const
@@ -1848,6 +1987,16 @@ void Timeline::repaintView()
 
 void Timeline::refresh()
 {
+    // The Looper track comes and goes (added by the player, or by recording a loop).
+    if ((rowHeights[(size_t) Track::loop] > 0) != isShown (Track::loop))
+    {
+        resized();
+        repaint();
+        lastSignature.clear();
+    }
+    if (selected == Track::loop && ! isShown (Track::loop))
+        setSelectedTrack (Track::amp);
+
     if (! viewInitialised && getWidth() > headerWidth)
     {
         viewInitialised = true;
@@ -1856,6 +2005,17 @@ void Timeline::refresh()
 
     for (auto& h : headers)
         h->refreshState();
+    if (master->isVisible())
+        master->refresh();
+
+    // A new song changes the length of everything: show it all.
+    const auto songKey = session.hasSong() ? session.getSong().file.getFullPathName() : juce::String();
+    if (songKey != shownSong)
+    {
+        shownSong = songKey;
+        if (viewInitialised && songKey.isNotEmpty())
+            zoomToFit();
+    }
 
     followPlayhead();
 
@@ -1869,7 +2029,6 @@ void Timeline::refresh()
     }
 
     overlay->repaint();
-    monitor->refresh();
     zoom->repaint();
 }
 
@@ -1892,7 +2051,7 @@ void Timeline::paint (juce::Graphics& g)
 
     // Below the headers: the empty part of the column.
     g.setColour (surface.withAlpha (0.55f));
-    g.fillRect (juce::Rectangle<int> (0, rulerHeight + 3 * rowHeight, headerWidth - 1, getHeight()));
+    g.fillRect (juce::Rectangle<int> (0, rulerHeight + lanesBottom(), headerWidth - 1, getHeight()));
 }
 
 void Timeline::resized()
@@ -1906,21 +2065,42 @@ void Timeline::resized()
     scrollbar.setBounds (lanes.removeFromBottom (scrollbarHeight));
     arrange->setBounds (lanes);
 
-    rowHeight = juce::jlimit (56, 100, (area.getHeight() - scrollbarHeight) / 3);
+    // Each track at its height; when they don't all fit (the thin strip of
+    // Jouer), they shrink together, never below 20 px.
+    // The Master row comes last, when there is room for it and the tracks.
+    const bool looperShown = isShown (Track::loop);
+    const int addRow = looperShown ? 0 : addRowHeight;
+    int shownCount = 0;
+    for (auto t : allTracks)
+        shownCount += isShown (t) ? 1 : 0;
+    const bool showMaster = area.getHeight() - scrollbarHeight > shownCount * 26 + addRow + MasterHeader::preferredHeight;
+    const int available = area.getHeight() - scrollbarHeight - addRow - (showMaster ? MasterHeader::preferredHeight : 0);
+    int wanted = 0;
+    for (auto t : allTracks)
+        wanted += isShown (t) ? trackHeights[(size_t) t] : 0;
+    const float scale = wanted > available ? (float) available / (float) wanted : 1.0f;
+    int y = 0;
+    for (auto t : allTracks)
+    {
+        rowHeights[(size_t) t] = isShown (t) ? std::max (20, (int) std::floor ((float) trackHeights[(size_t) t] * scale)) : 0;
+        rowTops[(size_t) t] = y;
+        y += rowHeights[(size_t) t];
+    }
+
     auto headerColumn = area.removeFromLeft (headerWidth - 1);
     for (auto& h : headers)
-        h->setBounds (headerColumn.removeFromTop (rowHeight));
+    {
+        h->setVisible (isShown (h->track));
+        h->setBounds (headerColumn.getX(), headerColumn.getY() + rowTop (h->track), headerColumn.getWidth(), rowHeightOf (h->track));
+    }
+    addLooperButton.setVisible (! looperShown);
+    addLooperButton.setBounds (juce::Rectangle<int> (headerColumn.getX() + 12, headerColumn.getY() + lanesBottom() + 5,
+                                                     std::min (headerColumn.getWidth() - 24, addLooperButton.getIdealWidth() + 16), 28));
+    master->setVisible (showMaster);
+    master->setBounds (headerColumn.getX(), headerColumn.getY() + lanesBottom() + addRow, headerColumn.getWidth(), MasterHeader::preferredHeight);
 
     overlay->setBounds (getLocalBounds().withTrimmedLeft (headerWidth).withTrimmedBottom (scrollbarHeight));
     headerSplitter.setBounds (headerWidth - 1 - roadie::ui::Splitter::thickness / 2, rulerHeight,
                               roadie::ui::Splitter::thickness, getHeight() - rulerHeight);
     updateScrollbar();
-
-    if (! monitorPlaced && getWidth() > 0)
-    {
-        monitor->setTopLeftPosition (getWidth() - monitor->getWidth() - 16, getHeight() - scrollbarHeight - monitor->getHeight() - 12);
-        monitorPlaced = true;
-    }
-    monitor->keepInside();
-    monitor->toFront (false);
 }

@@ -74,4 +74,100 @@ Result measureLag (const Capture& interfaceAudio, const Capture& cameraAudio)
     result.ok = std::abs (result.interfaceLagSeconds) < 0.5;
     return result;
 }
+
+namespace
+{
+constexpr double envelopeRate = 500.0; // 2 ms steps
+
+// Positive jumps of the log loudness, on a grid of absolute host time
+// (index 0 = `origin`): what a strum looks like, whatever the room does to it.
+std::vector<float> onsetEnvelope (const Capture& c, double origin, int length)
+{
+    std::vector<float> out ((size_t) length, 0.0f);
+    const int hop = std::max (1, (int) (c.sampleRate / envelopeRate));
+    std::vector<float> loudness;
+    for (int i = 0; i + hop <= c.numSamples; i += hop)
+    {
+        double sum = 0.0;
+        for (int k = 0; k < hop; ++k)
+            sum += (double) c.samples[i + k] * c.samples[i + k];
+        loudness.push_back ((float) std::log (1.0e-6 + std::sqrt (sum / hop)));
+    }
+    const double first = c.firstSampleHostSeconds - origin;
+    for (size_t i = 1; i < loudness.size(); ++i)
+    {
+        const int index = (int) std::lround ((first + (double) i * hop / c.sampleRate) * envelopeRate);
+        if (index >= 0 && index < length)
+            out[(size_t) index] = std::max (0.0f, loudness[i] - loudness[i - 1]);
+    }
+    // A little smoothing: the room blurs attacks by a few milliseconds.
+    std::vector<float> smooth (out.size(), 0.0f);
+    for (size_t i = 2; i + 2 < out.size(); ++i)
+        smooth[i] = 0.1f * out[i - 2] + 0.2f * out[i - 1] + 0.4f * out[i] + 0.2f * out[i + 1] + 0.1f * out[i + 2];
+    return smooth;
+}
+} // namespace
+
+Result measureLagFromPlaying (const Capture& interfaceAudio, const Capture& cameraAudio)
+{
+    Result result;
+    if (interfaceAudio.samples == nullptr || cameraAudio.samples == nullptr || interfaceAudio.numSamples < 1 || cameraAudio.numSamples < 1
+        || interfaceAudio.firstSampleHostSeconds <= 0.0 || cameraAudio.firstSampleHostSeconds <= 0.0)
+        return result;
+
+    const double origin = std::min (interfaceAudio.firstSampleHostSeconds, cameraAudio.firstSampleHostSeconds);
+    const double end = std::max (interfaceAudio.firstSampleHostSeconds + interfaceAudio.numSamples / interfaceAudio.sampleRate,
+                                 cameraAudio.firstSampleHostSeconds + cameraAudio.numSamples / cameraAudio.sampleRate);
+    const int length = (int) ((end - origin) * envelopeRate) + 1;
+    if (length < (int) (2.0 * envelopeRate) || length > (int) (30.0 * envelopeRate))
+        return result;
+
+    const auto a = onsetEnvelope (interfaceAudio, origin, length);
+    const auto b = onsetEnvelope (cameraAudio, origin, length);
+
+    double energyA = 0.0, energyB = 0.0;
+    for (int i = 0; i < length; ++i)
+    {
+        energyA += (double) a[(size_t) i] * a[(size_t) i];
+        energyB += (double) b[(size_t) i] * b[(size_t) i];
+    }
+    if (energyA < 1.0e-6 || energyB < 1.0e-6)
+        return result;
+    const double norm = std::sqrt (energyA * energyB);
+
+    const int maxLag = (int) (0.4 * envelopeRate);
+    std::vector<double> correlation ((size_t) (2 * maxLag + 1), 0.0);
+    for (int lag = -maxLag; lag <= maxLag; ++lag)
+    {
+        double sum = 0.0;
+        for (int t = std::max (0, lag); t < std::min (length, length + lag); ++t)
+            sum += (double) a[(size_t) t] * b[(size_t) (t - lag)];
+        correlation[(size_t) (lag + maxLag)] = sum / norm;
+    }
+
+    const auto peak = std::max_element (correlation.begin(), correlation.end());
+    double mean = 0.0;
+    for (auto v : correlation)
+        mean += v;
+    mean /= (double) correlation.size();
+
+    // One lag must stand clearly out of the others, and match for real.
+    if (*peak < 0.12 || *peak < mean * 3.0)
+        return result;
+
+    // Parabolic refinement between the 2 ms steps.
+    const size_t index = (size_t) std::distance (correlation.begin(), peak);
+    double lag = (double) ((int) index - maxLag);
+    if (index > 0 && index + 1 < correlation.size())
+    {
+        const double y0 = correlation[index - 1], y1 = correlation[index], y2 = correlation[index + 1];
+        const double d = y0 - 2.0 * y1 + y2;
+        if (std::abs (d) > 1.0e-12)
+            lag += 0.5 * (y0 - y2) / d;
+    }
+
+    result.interfaceLagSeconds = lag / envelopeRate;
+    result.ok = true;
+    return result;
+}
 } // namespace roadie::sync

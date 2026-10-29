@@ -164,6 +164,7 @@ void Looper::process (const float* input, float* loopOutput, int numSamples)
     auto currentState = state.load (std::memory_order_relaxed);
     int len = recordedLength.load (std::memory_order_relaxed);
     int head = playhead.load (std::memory_order_relaxed);
+    const int delay = len > 0 ? recordDelay.load (std::memory_order_relaxed) % len : 0;
 
     for (int i = 0; i < numSamples; ++i)
     {
@@ -197,8 +198,11 @@ void Looper::process (const float* input, float* loopOutput, int numSamples)
             case State::Overdubbing:
                 if (len > 0)
                 {
-                    out = buffer[(size_t) head] * overdubFeedback;
-                    buffer[(size_t) head] = out + input[i];
+                    // The previous layers fade a little each pass; the new
+                    // playing lands where it was heard, `delay` behind the head.
+                    out = buffer[(size_t) head];
+                    auto& slot = buffer[(size_t) ((head - delay + len) % len)];
+                    slot = slot * overdubFeedback + input[i];
                     head = (head + 1) % len;
                 }
                 break;

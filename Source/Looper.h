@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <vector>
 
@@ -71,6 +72,11 @@ public:
     // loop follows the timeline (cycle jumps, locate) instead of free-running.
     void setPlayhead (int sample) noexcept;
 
+    // Round-trip latency to compensate while overdubbing: the input arriving
+    // now was played against what the player heard `samples` ago, so it is
+    // written that far behind the read head (any thread).
+    void setRecordDelay (int samples) noexcept { recordDelay.store (std::max (0, samples), std::memory_order_relaxed); }
+
 private:
     void applyPendingRequests();
 
@@ -81,6 +87,7 @@ private:
     std::atomic<int> recordedLength { 0 }; // samples; fixes the loop length once recording stops
     std::atomic<int> playhead { 0 };
     std::atomic<int> layerCount { 0 };
+    std::atomic<int> recordDelay { 0 };
     std::atomic<State> state { State::Empty };
 
     std::atomic<bool> recordRequested { false };

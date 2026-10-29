@@ -37,14 +37,22 @@ bool writeTestMovie (const juce::File& file, int width, int height, double secon
         return false;
     [writer startSessionAtSourceTime: kCMTimeZero];
 
+    // The frames are made here rather than taken from the adaptor's pool:
+    // that pool's attribute dictionary was sometimes already released when
+    // CoreVideo read it ("CF objects must have a non-zero isa", a SIGILL in
+    // CVPixelBufferPoolCreatePixelBuffer — the rare crash of the engine tests).
+    NSDictionary* frameAttributes = @{ (id) kCVPixelBufferIOSurfacePropertiesKey: @{} };
+
     const int frames = (int) (seconds * 30.0);
     for (int f = 0; f < frames; ++f)
+    @autoreleasepool
     {
         while (! input.readyForMoreMediaData)
             [NSThread sleepForTimeInterval: 0.005];
 
         CVPixelBufferRef buffer = nullptr;
-        CVPixelBufferPoolCreatePixelBuffer (nullptr, adaptor.pixelBufferPool, &buffer);
+        CVPixelBufferCreate (kCFAllocatorDefault, (size_t) width, (size_t) height, kCVPixelFormatType_32BGRA,
+                             (__bridge CFDictionaryRef) frameAttributes, &buffer);
         if (buffer == nullptr)
             return false;
 

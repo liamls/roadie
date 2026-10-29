@@ -4,6 +4,7 @@
 
 #include <array>
 #include <atomic>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -18,8 +19,12 @@
 //
 //   input ─► AmpEngine ─► live ─┬──────────────────────────► TakeRecorder
 //                               ├─► (+ regions) × guitar ──┐
-//                               └─► Looper × loop ─────────┴─► mix ─► Metronome ─► out
+//                               └─► Looper × loop ─────────┴─► centre ─► Metronome ─┐
+//                                                                                   ├─► L/R out
+//                                                       (stereo sources) ───────────┘
 //
+// Guitar, loop and click are mono and sit in the centre of a stereo mix; a
+// stereo source (the backing track) adds its own left and right.
 // The transport is a linear timeline (samples from the start of the
 // arrangement), like a DAW: the regions play at their place, the loop
 // follows the playhead from its anchor, and the cycle zone wraps it.
@@ -48,6 +53,13 @@ public:
 
     // Looper pedal: record → play → overdub → play… Starts the transport.
     void recordLoop();
+    // A loop recording that starts by itself when the transport reaches
+    // `startAt` (after a count-in) and, if `endAt` is set, closes there: an
+    // exact number of bars. Both are transport samples.
+    void scheduleLoopRecord (std::int64_t startAt, std::int64_t endAt);
+    void cancelLoopSchedule() noexcept;
+    bool isLoopScheduled() const noexcept { return loopStartAt.load (std::memory_order_relaxed) != noLocate; }
+    std::int64_t getLoopStartAt() const noexcept { return loopStartAt.load (std::memory_order_relaxed); }
     // Stops the transport; a loop being recorded is closed, not thrown away.
     void stopAll();
 
@@ -81,16 +93,38 @@ public:
     int getLoopRecordCount() const noexcept { return loopRecordCount.load (std::memory_order_relaxed); }
 
     //==============================================================================
+    // Backing track: stereo, at the engine's sample rate, its first sample at
+    // `start` on the timeline (negative: it begins before the timeline).
+    // Handed over like the regions, without blocking the audio thread.
+    struct SongAudio
+    {
+        std::vector<float> left, right;
+    };
+    void setSong (std::shared_ptr<const SongAudio> audio);
+    void setSongStart (std::int64_t start) noexcept { songStart.store (start, std::memory_order_relaxed); }
+    void setSongMuted (bool shouldBeMuted) noexcept { songMuted.store (shouldBeMuted, std::memory_order_relaxed); }
+    void setSongGain (float linear) noexcept { songGain.store (linear, std::memory_order_relaxed); }
+    float getSongPeak() const noexcept { return songPeak.load (std::memory_order_relaxed); }
+
+    //==============================================================================
     // Mix: per-track mute (from mute/solo) and volume.
     void setGuitarMuted (bool shouldBeMuted) noexcept { guitarMuted.store (shouldBeMuted, std::memory_order_relaxed); }
     void setLoopMuted (bool shouldBeMuted) noexcept { loopMuted.store (shouldBeMuted, std::memory_order_relaxed); }
     void setGuitarGain (float linear) noexcept { guitarGain.store (linear, std::memory_order_relaxed); }
+    // Master: the whole output (the click too), after the sum.
+    void setMasterGain (float linear) noexcept { masterGain.store (linear, std::memory_order_relaxed); }
+    float getOutputPeakLeft() const noexcept { return outputPeakLeft.load (std::memory_order_relaxed); }
+    float getOutputPeakRight() const noexcept { return outputPeakRight.load (std::memory_order_relaxed); }
     void setLoopGain (float linear) noexcept { loopGain.store (linear, std::memory_order_relaxed); }
 
     float getInputPeak() const noexcept { return inputPeak.load (std::memory_order_relaxed); }
     float getOutputPeak() const noexcept { return outputPeak.load (std::memory_order_relaxed); }
     float getGuitarPeak() const noexcept { return guitarPeak.load (std::memory_order_relaxed); }
     float getLoopPeak() const noexcept { return loopPeak.load (std::memory_order_relaxed); }
+
+    // The last samples of the raw input (before the amp), for the tuner.
+    static constexpr int recentInputCapacity = 1 << 13;
+    void copyRecentInput (float* destination, int numSamples) const noexcept;
 
     // Peak history of the amped guitar, one value per 10 ms of timeline,
     // written as the playhead passes: draws the region being recorded.
@@ -103,8 +137,15 @@ public:
 
     //==============================================================================
     // Takes: the amped guitar (no loop, no click) streamed to disk, and the
-    // timeline position of its first sample.
-    bool startTake (const juce::File& wavFile);
+    // timeline position of its first sample — where the player heard the
+    // arrangement when playing it, i.e. compensated for the round trip (may
+    // be negative for a take started at 0).
+    // `locateTo` (≥ 0) moves the playhead there first, in the same audio
+    // block as the take's first sample (the count-in backs up a bar).
+    // `locateTo` may be negative (a count-in plays before the timeline's first
+    // bar); noLocate leaves the transport where it is.
+    static constexpr std::int64_t noLocate = std::numeric_limits<std::int64_t>::min();
+    bool startTake (const juce::File& wavFile, std::int64_t locateTo = noLocate, const juce::File& dryWavFile = {});
     void stopTake();
     std::int64_t getTakeStartPosition() const noexcept { return takeStartPos.load (std::memory_order_acquire); }
 
@@ -120,8 +161,14 @@ public:
     // lock: the audio thread outputs silence for that block instead of waiting.
     void loadLoop (const std::vector<float>& samples, int layers);
 
-    // Current estimate of the round-trip latency, for the "Latence" pill.
+    // Round trip from the input jack to the speakers, as the device reports
+    // it (CoreAudio's figures each include their buffer). Takes, loops and
+    // overdubs are placed this much earlier on the timeline, like a DAW's
+    // recording-delay compensation. The adjustment (settings) corrects a
+    // driver that under-reports.
     double getRoundTripLatencyMs() const noexcept { return roundTripMs.load (std::memory_order_relaxed); }
+    int getRecordLatencySamples() const noexcept { return recordLatency.load (std::memory_order_relaxed); }
+    void setLatencyAdjustmentSamples (int samples) noexcept;
 
     //==============================================================================
     void audioDeviceIOCallbackWithContext (const float* const* inputChannelData, int numInputChannels,
@@ -134,6 +181,7 @@ private:
     double estimateInputHostTime (const juce::AudioIODeviceCallbackContext& context, int numSamples) const noexcept;
     void updateTransport() noexcept;
     void pickUpPlaybackClips() noexcept;
+    void renderSong (std::int64_t pos, int numSamples, float* left, float* right, float& peak) noexcept;
     int chunkLength (std::int64_t pos, int wanted, bool cycleActive) const noexcept;
     void renderClips (std::int64_t pos, int numSamples, float* out) noexcept;
     void renderLoop (const float* live, float* loopOut, std::int64_t pos, int numSamples, bool running) noexcept;
@@ -143,16 +191,18 @@ private:
     Looper looper;
     Metronome metronome;
     TakeRecorder takeRecorder;
+    TakeRecorder dryRecorder; // the guitar before the amp, to change the amp after the take
 
     juce::SpinLock processLock;
 
-    std::vector<float> liveBuffer, loopBuffer, clipBuffer, mixBuffer;
+    std::vector<float> liveBuffer, loopBuffer, clipBuffer, mixBuffer, leftBuffer, rightBuffer;
     std::vector<char> coveredBuffer;
 
     std::atomic<double> sampleRate { 48000.0 };
     std::atomic<int> blockSize { 64 };
     std::atomic<int> inputLatencySamples { 0 };
     std::atomic<double> roundTripMs { 0.0 };
+    std::atomic<int> deviceRoundTrip { 0 }, latencyAdjustment { 0 }, recordLatency { 0 };
 
     std::atomic<std::int64_t> transportPos { 0 };
     std::atomic<bool> transportRunning { false };
@@ -168,6 +218,12 @@ private:
     std::shared_ptr<const PlaybackList> pendingClips, activeClips, retiredClips;
     bool hasPendingClips = false;
 
+    std::shared_ptr<const SongAudio> pendingSong, activeSong, retiredSong;
+    bool hasPendingSong = false;
+    std::atomic<std::int64_t> songStart { 0 };
+    std::atomic<bool> songMuted { false };
+    std::atomic<float> songGain { 1.0f }, songPeak { 0.0f };
+
     std::atomic<std::int64_t> loopAnchor { 0 }, loopRegionStart { 0 }, loopRegionEnd { -1 };
     std::atomic<int> loopRecordCount { 0 };
 
@@ -175,13 +231,19 @@ private:
     std::atomic<float> guitarGain { 1.0f }, loopGain { 1.0f };
 
     std::atomic<float> inputPeak { 0.0f }, outputPeak { 0.0f }, guitarPeak { 0.0f }, loopPeak { 0.0f };
+    std::atomic<float> masterGain { 1.0f }, outputPeakLeft { 0.0f }, outputPeakRight { 0.0f };
 
     std::array<std::atomic<float>, historyCapacity> history {};
+    std::array<std::atomic<float>, recentInputCapacity> recentInput {};
+    std::atomic<int> recentInputWrite { 0 };
     std::atomic<int> historySlotSamples { 480 };
     std::int64_t historySlot = -1;
     float historyPeakInSlot = 0.0f;
 
     std::atomic<bool> takeStartPending { false };
+    std::atomic<std::int64_t> takeLocate { noLocate };
+    std::atomic<std::int64_t> loopStartAt { noLocate }, loopEndAt { noLocate };
+    bool takeRolling = false; // audio thread: the take has its first block
     std::atomic<std::int64_t> takeStartPos { 0 };
 
     std::vector<float> calibrationBuffer;

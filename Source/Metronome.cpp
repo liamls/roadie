@@ -1,12 +1,13 @@
 #include "Metronome.h"
 
 #include <cmath>
+#include <limits>
 
 void Metronome::prepare (double newSampleRate)
 {
     sampleRate = newSampleRate;
     clickLengthSamples = (int) (0.02 * sampleRate); // 20 ms click
-    lastBeatIndex = -1;
+    lastBeatIndex = std::numeric_limits<std::int64_t>::min();
     clickEnvelopePos = -1;
 }
 
@@ -17,7 +18,8 @@ double Metronome::getSamplesPerBeat() const noexcept
 
 void Metronome::process (float* samples, int numSamples, std::int64_t transportStart, bool transportRunning)
 {
-    const bool on = enabled.load (std::memory_order_relaxed);
+    const bool metronomeOn = enabled.load (std::memory_order_relaxed);
+    const auto countIn = countInEnd.load (std::memory_order_relaxed);
     const double samplesPerBeat = getSamplesPerBeat();
     const int beatsPerBar = beatsPerBarAtomic.load (std::memory_order_relaxed);
 
@@ -31,7 +33,7 @@ void Metronome::process (float* samples, int numSamples, std::int64_t transportS
             if (beat != lastBeatIndex)
             {
                 lastBeatIndex = beat;
-                if (on)
+                if (metronomeOn || transportStart + i < countIn)
                 {
                     clickEnvelopePos = 0;
                     accentedClick = beat % beatsPerBar == 0;
@@ -55,5 +57,5 @@ void Metronome::process (float* samples, int numSamples, std::int64_t transportS
     }
 
     if (! transportRunning)
-        lastBeatIndex = -1; // the next start clicks immediately on its first beat
+        lastBeatIndex = std::numeric_limits<std::int64_t>::min(); // the next start clicks immediately on its first beat
 }

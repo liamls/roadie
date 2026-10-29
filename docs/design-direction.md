@@ -17,35 +17,46 @@ Positionnement : entre les outils pro (Ableton, Logic, Resolve — sombres, dens
 
 ## Palette
 
-Déjà implémentée dans `Source/Theme.h` :
+Implémentée dans `Source/Theme.h` (révision 2, octobre 2026). Proposition détaillée, avec le benchmark Logic Pro / GarageBand / Ableton Live et un aperçu de l'écran : **https://claude.ai/artifact/VvXv1geVkQMfh5bGUWWTLS** (lien privé, même remarque que pour la maquette).
+
+Ce que le benchmark des trois apps a montré, et qui fonde cette révision :
+
+- **Chrome neutre, couleur réservée au contenu** : panneaux en gris quasi sans teinte, couleur seulement sur les régions, clips et états. Roadie garde ce principe avec sa couleur par module.
+- **Paliers de surface marqués** : environ +16 en sRGB par niveau chez Logic et GarageBand (`#18` → `#28` → `#38`). Les paliers de la v1 (environ +8) faisaient se confondre les panneaux.
+- **La couleur dit le type** (GarageBand : vert instrument, bleu audio, jaune Drummer) : c'est le levier « débutant ». Les accents v1 étaient les valeurs exactes de Tailwind (teal-400, violet-400…) ; ils sont recalibrés en OKLCH à luminosité proche.
+- **Rouge = enregistrement, et rien d'autre** (Logic : rouge pur). Le `rec` v1 était un corail trop proche de l'orange de l'ampli.
+
+Les neutres v1 (`#16171B`…) tiraient en réalité vers le bleu malgré l'intention « chaude » ; ceux de la v2 ont une vraie teinte chaude, très légère (OKLCH h entre 67° et 85°, chroma ≤ 0,008 pour les surfaces et ≤ 0,011 pour les textes).
 
 | Token | Hex | Usage |
 |---|---|---|
-| `background` | `#16171B` | Fond principal, quasi-noir chaud, jamais noir pur |
-| `surface` | `#1E2026` | Cartes niveau 1 |
-| `surfaceRaised` | `#272A32` | Cartes niveau 2 / composants surélevés (valeur du mockup) |
-| `surfaceSunken` | `#121318` | Champs creux (afficheurs, barres) |
-| `border` | `#2E313A` | Contours |
-| `text` | `#F5F3EE` | Texte principal, blanc cassé chaud |
-| `textMuted` | `#9A978F` | Texte secondaire |
-| `textFaint` | `#6B6962` | Texte tertiaire |
+| `background` | `#181613` | Fond principal, anthracite chaud, jamais noir pur |
+| `surface` | `#23201D` | Cartes niveau 1 |
+| `surfaceRaised` | `#2F2C28` | Cartes niveau 2 / composants surélevés |
+| `surfaceSunken` | `#100E0C` | Champs creux (afficheurs, barres) |
+| `border` | `#3D3A36` | Contours |
+| `text` | `#F6F3ED` | Texte principal, blanc cassé chaud (16:1 sur le fond) |
+| `textMuted` | `#B0ACA5` | Texte secondaire (8:1) |
+| `textFaint` | `#87827D` | Texte tertiaire (4,8:1, au-dessus du seuil de 4,5:1 des petits textes) |
 
 **Couleur fixe par module** (jamais une palette libre par piste — trop pour un public non-initié) :
 
 | Module | Hex | Token |
 |---|---|---|
-| 🟠 Ampli | `#FF7A3D` | `ampAccent` |
-| 🟢 Looper | `#2DD4BF` | `loopAccent` |
-| 🟣 Caméra | `#A78BFA` | `camAccent` |
-| 🟡 Export | `#FFD166` | `exportAccent` |
+| 🟠 Ampli | `#F9853B` | `ampAccent` |
+| 🟢 Looper | `#47DAB4` | `loopAccent` |
+| 🟣 Caméra | `#B494F5` | `camAccent` |
+| 🟡 Export | `#FBD452` | `exportAccent` — seule couleur d'action principale |
 
 Sémantique (distincte de l'accent de couleur, ne jamais réutiliser pour autre chose) :
 
 | Rôle | Hex | Token |
 |---|---|---|
-| OK / validé | `#4ADE80` | `ok` |
-| Avertissement | `#FBBF24` | `warn` |
-| Enregistrement actif | `#E85D4A` | `rec` |
+| OK / validé | `#61D779` | `ok` |
+| Avertissement | `#FABB41` | `warn` — réservé aux jauges CPU / latence, pour ne pas se confondre avec Export |
+| Enregistrement actif | `#F73A37` | `rec` |
+
+Texte et icônes posés sur un aplat d'accent (bouton plein, en-tête de région sélectionnée, logo) : `onAccent` `#100E0C`, foncé dans les deux thèmes (13:1 sur le jaune, 5:1 sur le rouge, là où du blanc n'atteindrait que 3,7:1).
 
 ## Typographie
 
@@ -71,13 +82,27 @@ Sombre par défaut (confort en conditions de jeu/scène, contraste webcam). **Mo
 
 | Token | Sombre | Clair |
 |---|---|---|
-| `background` | `#16171B` | `#F3EEE5` |
-| `surface` | `#1E2026` | `#FBF8F2` |
-| `surfaceRaised` | `#272A32` | `#FFFDF9` |
-| `surfaceSunken` | `#121318` | `#E9E2D6` |
-| `border` | `#2E313A` | `#DCD3C4` |
-| `text` | `#F5F3EE` | `#1F1C17` |
-| `textMuted` | `#9A978F` | `#6E685E` |
-| `textFaint` | `#6B6962` | `#9C9588` |
+| `background` | `#181613` | `#F1ECE4` |
+| `surface` | `#23201D` | `#F9F6F1` |
+| `surfaceRaised` | `#2F2C28` | `#FEFCF9` |
+| `surfaceSunken` | `#100E0C` | `#E5DFD6` |
+| `border` | `#3D3A36` | `#D8D2C7` |
+| `text` | `#F6F3ED` | `#221D18` |
+| `textMuted` | `#B0ACA5` | `#69625B` |
+| `textFaint` | `#87827D` | `#857F77` |
+
+En clair, `textMuted` atteint 5,1:1 sur le fond et `textFaint` 3,4:1 (contre 2,6:1 en v1).
+
+**Texte et icônes en couleur d'accent** (libellé « Caméra », pastilles d'indication, icônes de piste et de boutons, coches, messages d'état) : passer par `roadie::theme::ink (accent)`. En sombre il rend l'accent tel quel ; en clair, une « encre » assombrie à 4,5:1 ou plus sur le crème, où les accents vifs disparaîtraient (le jaune Export surtout). Les aplats, contours, jauges et formes d'onde gardent l'accent lui-même.
+
+| Accent | Encre (mode clair) |
+|---|---|
+| `ampAccent` | `#AF4B00` |
+| `loopAccent` | `#097964` |
+| `camAccent` | `#764EB7` |
+| `exportAccent` | `#896600` |
+| `ok` | `#217937` |
+| `warn` | `#945F00` |
+| `rec` | `#CC2827` |
 
 La zone d'image du moniteur caméra reste sombre dans les deux thèmes (c'est un « écran »).

@@ -120,10 +120,29 @@ Splitter::Splitter (Orientation o) : orientation (o)
     setTooltip (juce::String::fromUTF8 ("Glisse pour redimensionner \xc2\xb7 double-clic : taille par d\xc3\xa9" "faut"));
 }
 
+void Splitter::setCollapsed (bool shouldShowGrip)
+{
+    if (collapsed == shouldShowGrip)
+        return;
+    collapsed = shouldShowGrip;
+    setTooltip (collapsed ? juce::String::fromUTF8 ("Glisse pour rouvrir le panneau \xc2\xb7 double-clic : taille par d\xc3\xa9" "faut")
+                          : juce::String::fromUTF8 ("Glisse pour redimensionner \xc2\xb7 double-clic : taille par d\xc3\xa9" "faut"));
+    repaint();
+}
+
 void Splitter::paint (juce::Graphics& g)
 {
-    // Only the hover line: the panels draw their own border underneath.
+    // Only the hover line: the panels draw their own border underneath. A
+    // folded panel leaves a grip, so there is always something to pull.
     const float amount = fade.get (dragging || isMouseOver());
+    if (collapsed)
+    {
+        auto bounds = getLocalBounds().toFloat();
+        const auto grip = orientation == Orientation::vertical ? bounds.withSizeKeepingCentre (4.0f, 36.0f)
+                                                               : bounds.withSizeKeepingCentre (36.0f, 4.0f);
+        g.setColour (theme::textFaint.interpolatedWith (theme::exportAccent, amount));
+        roadie::theme::fillSquircle (g, grip, 2.0f);
+    }
     if (amount <= 0.0f)
         return;
 
@@ -184,14 +203,14 @@ void IconButton::paintButton (juce::Graphics& g, bool isOver, bool isDown)
 
     if (style == Style::record)
     {
-        iconColour = rec;
+        iconColour = ink (rec);
         fill = rec.withAlpha (lit ? 0.22f : 0.12f * hover);
     }
     else
     {
         if (lit)
         {
-            iconColour = accent.value_or (theme::text);
+            iconColour = accent.has_value() ? ink (*accent) : theme::text;
             fill = accent.has_value() ? accent->withAlpha (0.16f + 0.06f * hover) : theme::text.withAlpha (0.08f + 0.03f * hover);
         }
         else
@@ -213,7 +232,7 @@ void IconButton::paintButton (juce::Graphics& g, bool isOver, bool isDown)
     if (style == Style::square)
     {
         g.setColour (fill);
-        g.fillRoundedRectangle (bounds, 6.0f);
+        roadie::theme::fillSquircle (g, bounds, 6.0f);
         icons::draw (g, icon, bounds.reduced (bounds.getHeight() * 0.25f), iconColour);
     }
     else
@@ -256,21 +275,21 @@ void PillButton::paintButton (juce::Graphics& g, bool isOver, bool isDown)
         case Variant::solid:
             fill = accent;
             outline = accent;
-            label = juce::Colour (0xff16171b);
+            label = theme::onAccent;
             iconColour = label;
             break;
         case Variant::tinted:
             fill = accent.withAlpha (lit ? 0.24f : 0.12f);
             outline = accent;
             label = theme::text;
-            iconColour = accent;
+            iconColour = ink (accent);
             break;
         case Variant::neutral:
         default:
             fill = lit ? accent.withAlpha (0.14f) : surfaceRaised;
             outline = lit ? accent : border;
             label = theme::text;
-            iconColour = lit ? accent : theme::text;
+            iconColour = lit ? ink (accent) : theme::text;
             break;
     }
 
@@ -283,9 +302,9 @@ void PillButton::paintButton (juce::Graphics& g, bool isOver, bool isDown)
 
     const float alpha = isEnabled() ? 1.0f : 0.35f;
     g.setColour (fill.withMultipliedAlpha (alpha));
-    g.fillRoundedRectangle (bounds, radius);
+    roadie::theme::fillSquircle (g, bounds, radius);
     g.setColour (outline.withMultipliedAlpha (alpha));
-    g.drawRoundedRectangle (bounds, radius, 1.0f);
+    roadie::theme::drawSquircle (g, bounds, radius, 1.0f);
 
     const auto font = fonts::semibold (fontSize);
     g.setFont (font);
@@ -315,6 +334,8 @@ Knob::Knob (const juce::String& c, juce::Colour accent) : caption (c)
     slider.setRotaryParameters (juce::degreesToRadians (-135.0f), juce::degreesToRadians (135.0f), true);
     slider.setMouseDragSensitivity (180);
     slider.setVelocityBasedMode (false);
+    // ⇧ while dragging: fine adjustment (incremental and slow).
+    slider.setVelocityModeParameters (0.12, 1, 0.0, true, juce::ModifierKeys::shiftModifier);
     slider.setPopupDisplayEnabled (false, false, nullptr);
     slider.onValueChange = [this]
     {
@@ -371,41 +392,415 @@ void Knob::paint (juce::Graphics& g)
 }
 
 //==============================================================================
+float Meter::toProportion (float linear)
+{
+    const float db = 20.0f * std::log10 (std::max (linear, 1.0e-6f));
+    return juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 63.0f);
+}
+
 void Meter::setLevel (float linear)
 {
-    // Fast attack, ~300 ms release, so peaks stay readable at 15–30 fps.
-    displayed = linear > displayed ? linear : displayed * 0.82f + linear * 0.18f;
-    if (std::abs (displayed - level) > 0.002f)
+    target = std::max (target, linear); // the next frame takes the loudest block since the last one
+    if (linear >= 1.0f && ! clipped)
     {
-        level = displayed;
+        clipped = true;
+        setTooltip (juce::String::fromUTF8 ("Saturation \xe2\x80\x94 clique pour \xc3\xa9teindre le t\xc3\xa9moin"));
         repaint();
     }
+}
+
+void Meter::resetClip()
+{
+    clipped = false;
+    peak = displayed;
+    repaint();
+}
+
+void Meter::tick()
+{
+    const double now = nowSeconds();
+    const float dt = (float) juce::jlimit (0.0, 0.1, lastTick > 0.0 ? now - lastTick : 1.0 / 60.0);
+    lastTick = now;
+
+    // Instant attack, ~20 dB/s release (PPM-like), so peaks stay readable.
+    const float before = displayed, peakBefore = peak;
+    if (target >= displayed)
+        displayed = target;
+    else
+        displayed = std::max (target, displayed * std::pow (10.0f, -20.0f * dt / 20.0f));
+    target = 0.0f;
+
+    if (displayed >= peak || now - peakTime > 1.5)
+    {
+        peak = displayed;
+        peakTime = now;
+    }
+
+    if (std::abs (toProportion (displayed) - toProportion (before)) > 0.002f || ! juce::exactlyEqual (peak, peakBefore))
+        repaint();
 }
 
 void Meter::paint (juce::Graphics& g)
 {
     using namespace theme;
+    const bool vertical = orientation == Orientation::vertical;
+    auto bounds = getLocalBounds().toFloat().reduced (0.5f);
+    const float r = std::min (bounds.getWidth(), bounds.getHeight()) * 0.5f;
+    g.setColour (surfaceSunken);
+    roadie::theme::fillSquircle (g, bounds, r);
+    g.setColour (border);
+    roadie::theme::drawSquircle (g, bounds, r, 1.0f);
+
+    auto fill = bounds.reduced (1.0f);
+    const float length = vertical ? fill.getHeight() : fill.getWidth();
+    auto along = [&] (float proportion)
+    {
+        return vertical ? fill.withTop (fill.getBottom() - length * proportion) : fill.withWidth (length * proportion);
+    };
+
+    // Clip light at the far end (red until clicked).
+    if (clipped)
+    {
+        g.setColour (rec);
+        const float light = std::min (5.0f, length * 0.08f);
+        roadie::theme::fillSquircle (g, vertical ? fill.withHeight (light) : fill.withLeft (fill.getRight() - light), r);
+    }
+
+    // 0 dBFS sits at 60/63 of the travel: the top 3 dB are the red zone.
+    const float zero = 60.0f / 63.0f;
+    juce::ColourGradient gradient = vertical ? juce::ColourGradient (ok, 0.0f, fill.getBottom(), rec, 0.0f, fill.getY(), false)
+                                             : juce::ColourGradient (ok, fill.getX(), 0.0f, rec, fill.getRight(), 0.0f, false);
+    gradient.addColour (zero * 0.8, ok.interpolatedWith (warn, 0.5f));
+    gradient.addColour (zero - 0.04, warn);
+    gradient.addColour (zero, rec);
+
+    const float proportion = toProportion (displayed);
+    if (proportion > 0.0f)
+    {
+        g.setGradientFill (gradient);
+        g.saveState();
+        g.reduceClipRegion (along (proportion).toNearestInt());
+        roadie::theme::fillSquircle (g, fill, r);
+        g.restoreState();
+    }
+
+    // Peak hold: a thin line where the last peak was.
+    const float peakProportion = toProportion (peak);
+    if (peakProportion > 0.01f)
+    {
+        g.setColour (peakProportion >= zero ? rec : text.withAlpha (0.8f));
+        if (vertical)
+            g.fillRect (fill.getX(), fill.getBottom() - length * peakProportion, fill.getWidth(), 1.5f);
+        else
+            g.fillRect (fill.getX() + length * peakProportion - 1.5f, fill.getY(), 1.5f, fill.getHeight());
+    }
+}
+
+//==============================================================================
+Fader::Fader (juce::Colour a, Orientation o) : accent (a), orientation (o)
+{
+    noFocus (*this);
+    setMouseCursor (orientation == Orientation::vertical ? juce::MouseCursor::UpDownResizeCursor : juce::MouseCursor::LeftRightResizeCursor);
+    setRepaintsOnMouseActivity (true);
+}
+
+float Fader::toProportion (float db)
+{
+    // Piecewise console law: −∞ … −60 … −40 … −20 … −10 … 0 … +6.
+    static constexpr float dbs[] = { -60.0f, -40.0f, -20.0f, -10.0f, 0.0f, 6.0f };
+    static constexpr float pos[] = { 0.0f, 0.15f, 0.42f, 0.6f, 0.75f, 1.0f };
+    if (db <= dbs[0])
+        return 0.0f;
+    for (int i = 1; i < 6; ++i)
+        if (db <= dbs[i])
+            return pos[i - 1] + (db - dbs[i - 1]) / (dbs[i] - dbs[i - 1]) * (pos[i] - pos[i - 1]);
+    return 1.0f;
+}
+
+float Fader::fromProportion (float p)
+{
+    static constexpr float dbs[] = { -60.0f, -40.0f, -20.0f, -10.0f, 0.0f, 6.0f };
+    static constexpr float pos[] = { 0.0f, 0.15f, 0.42f, 0.6f, 0.75f, 1.0f };
+    p = juce::jlimit (0.0f, 1.0f, p);
+    for (int i = 1; i < 6; ++i)
+        if (p <= pos[i])
+            return dbs[i - 1] + (p - pos[i - 1]) / (pos[i] - pos[i - 1]) * (dbs[i] - dbs[i - 1]);
+    return maxDb;
+}
+
+juce::String Fader::format (float db)
+{
+    if (db <= minDb + 0.01f)
+        return juce::String::fromUTF8 ("\xe2\x88\x92\xe2\x88\x9e dB");
+    const auto rounded = std::round (db * 10.0f) / 10.0f;
+    return (rounded > 0.0f ? "+" : (rounded < 0.0f ? juce::String::fromUTF8 ("\xe2\x88\x92") : juce::String()))
+           + juce::String (std::abs (rounded), 1).replaceCharacter ('.', ',') + " dB";
+}
+
+void Fader::setValue (float db)
+{
+    db = juce::jlimit (minDb, maxDb, db);
+    if (juce::approximatelyEqual (db, value))
+        return;
+    value = db;
+    setTooltip ("Volume : " + format (value) + juce::String::fromUTF8 (" \xc2\xb7 double-clic ou \xe2\x8c\xa5-clic : 0 dB"));
+    repaint();
+}
+
+void Fader::set (float db)
+{
+    // A small detent at unity.
+    if (std::abs (db) < 0.4f)
+        db = 0.0f;
+    setValue (db);
+    if (onChange)
+        onChange (value);
+}
+
+juce::Rectangle<float> Fader::getTrack() const
+{
+    auto bounds = getLocalBounds().toFloat();
+    return orientation == Orientation::vertical ? bounds.reduced (0.0f, 8.0f) : bounds.reduced (8.0f, 0.0f);
+}
+
+void Fader::paint (juce::Graphics& g)
+{
+    using namespace theme;
+    const auto track = getTrack();
+    const bool vertical = orientation == Orientation::vertical;
+    const float active = fade.get (isMouseOverOrDragging());
+    const float p = toProportion (value);
+
+    const float thickness = 4.0f;
+    const auto groove = vertical ? track.withSizeKeepingCentre (thickness, track.getHeight())
+                                 : track.withSizeKeepingCentre (track.getWidth(), thickness);
+    g.setColour (border);
+    roadie::theme::fillSquircle (g, groove, thickness * 0.5f);
+
+    const auto filled = vertical ? groove.withTop (groove.getBottom() - groove.getHeight() * p) : groove.withWidth (groove.getWidth() * p);
+    g.setColour (accent.withAlpha (0.65f + 0.3f * active));
+    roadie::theme::fillSquircle (g, filled, thickness * 0.5f);
+
+    // 0 dB tick.
+    const float zero = toProportion (0.0f);
+    g.setColour (textFaint);
+    if (vertical)
+        g.fillRect (juce::Rectangle<float> (groove.getRight() + 3.0f, track.getBottom() - track.getHeight() * zero - 0.5f, 5.0f, 1.0f));
+    else
+        g.fillRect (juce::Rectangle<float> (track.getX() + track.getWidth() * zero - 0.5f, groove.getBottom() + 3.0f, 1.0f, 4.0f));
+
+    // Cap.
+    const juce::Point<float> centre = vertical ? juce::Point<float> (track.getCentreX(), track.getBottom() - track.getHeight() * p)
+                                               : juce::Point<float> (track.getX() + track.getWidth() * p, track.getCentreY());
+    const auto cap = vertical ? juce::Rectangle<float> (18.0f + 2.0f * active, 10.0f).withCentre (centre)
+                              : juce::Rectangle<float> (10.0f + 2.0f * active, 10.0f + 2.0f * active).withCentre (centre);
+    g.setColour (juce::Colours::black.withAlpha (0.35f));
+    roadie::theme::fillSquircle (g, cap.translated (0.0f, 1.0f), 3.0f);
+    g.setColour (theme::text);
+    roadie::theme::fillSquircle (g, cap, vertical ? 3.0f : cap.getHeight() * 0.5f);
+    if (vertical)
+    {
+        g.setColour (surfaceSunken.withAlpha (0.7f));
+        g.fillRect (cap.withSizeKeepingCentre (cap.getWidth() - 6.0f, 1.0f));
+    }
+
+    // Horizontal: the value over the far end of the track while active.
+    if (active > 0.01f && ! vertical)
+    {
+        const auto label = format (value);
+        const auto font = fonts::semibold (9.5f);
+        const float w = fonts::getTabularWidth (font, label) + 8.0f;
+        auto tag = juce::Rectangle<float> (w, 12.0f).withCentre ({ centre.x < track.getCentreX() ? track.getRight() - w * 0.5f : track.getX() + w * 0.5f,
+                                                                   track.getCentreY() });
+        g.setColour (surfaceRaised.withAlpha (0.95f * active));
+        roadie::theme::fillSquircle (g, tag, 4.0f);
+        g.setColour (theme::text.withAlpha (active));
+        g.setFont (font);
+        fonts::drawTabular (g, label, tag, juce::Justification::centred);
+    }
+
+    // Value bubble while hovered or dragged.
+    if (active > 0.01f && vertical)
+    {
+        const auto label = format (value);
+        const auto font = fonts::semibold (10.5f);
+        const float w = fonts::getTabularWidth (font, label) + 10.0f;
+        auto bubble = juce::Rectangle<float> (w, 16.0f).withCentre (centre).withX (cap.getRight() + 4.0f);
+        if (bubble.getRight() > (float) getWidth())
+            bubble.setX (cap.getX() - 4.0f - w);
+        g.setColour (surfaceRaised.withAlpha (0.95f * active));
+        roadie::theme::fillSquircle (g, bubble, 5.0f);
+        g.setColour (theme::text.withAlpha (active));
+        g.setFont (font);
+        fonts::drawTabular (g, label, bubble, juce::Justification::centred);
+    }
+}
+
+void Fader::mouseDown (const juce::MouseEvent& e)
+{
+    if (e.mods.isAltDown())
+    {
+        set (0.0f);
+        return;
+    }
+    dragging = true;
+    proportionAtDragStart = toProportion (value);
+    repaint();
+}
+
+void Fader::mouseDrag (const juce::MouseEvent& e)
+{
+    if (! dragging)
+        return;
+    const auto track = getTrack();
+    const float travel = orientation == Orientation::vertical ? track.getHeight() : track.getWidth();
+    const float distance = orientation == Orientation::vertical ? (float) -e.getDistanceFromDragStartY() : (float) e.getDistanceFromDragStartX();
+    const float fine = e.mods.isShiftDown() ? 0.15f : 1.0f;
+    set (fromProportion (proportionAtDragStart + distance * fine / std::max (1.0f, travel)));
+}
+
+void Fader::mouseUp (const juce::MouseEvent&)
+{
+    dragging = false;
+    repaint();
+}
+
+void Fader::mouseDoubleClick (const juce::MouseEvent&)
+{
+    set (0.0f);
+}
+
+void Fader::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
+{
+    const float delta = (std::abs (wheel.deltaY) > std::abs (wheel.deltaX) ? wheel.deltaY : -wheel.deltaX) * (wheel.isReversed ? -1.0f : 1.0f);
+    set (fromProportion (toProportion (value) + delta * (e.mods.isShiftDown() ? 0.02f : 0.1f)));
+}
+
+//==============================================================================
+SegmentedControl::SegmentedControl (std::vector<Segment> s) : segments (std::move (s))
+{
+    noFocus (*this);
+    for (size_t i = 0; i < segments.size(); ++i)
+        fades.push_back (std::make_unique<HoverFade> (*this));
+    setMouseCursor (juce::MouseCursor::PointingHandCursor);
+}
+
+void SegmentedControl::setSelected (int index)
+{
+    if (index != selected)
+    {
+        selected = index;
+        repaint();
+    }
+}
+
+int SegmentedControl::getIdealWidth() const
+{
+    int width = 4;
+    for (const auto& segment : segments)
+        width += 14 + 16 + 6 + (int) std::ceil (juce::GlyphArrangement::getStringWidth (fonts::semibold (12.5f), segment.label)) + 14;
+    return width;
+}
+
+juce::Rectangle<int> SegmentedControl::getSegmentBounds (int index) const
+{
+    auto inner = getLocalBounds().reduced (2);
+    int x = inner.getX();
+    for (int i = 0; i < (int) segments.size(); ++i)
+    {
+        // Segments share the width as their ideal widths do (equally when squeezed).
+        const int w = 14 + 16 + 6 + (int) std::ceil (juce::GlyphArrangement::getStringWidth (fonts::semibold (12.5f), segments[(size_t) i].label)) + 14;
+        const int scaled = inner.getWidth() >= getIdealWidth() - 4 ? w * inner.getWidth() / std::max (1, getIdealWidth() - 4)
+                                                                     : inner.getWidth() / (int) segments.size();
+        if (i == index)
+            return { x, inner.getY(), i == (int) segments.size() - 1 ? inner.getRight() - x : scaled, inner.getHeight() };
+        x += scaled;
+    }
+    return {};
+}
+
+int SegmentedControl::segmentAt (juce::Point<int> p) const
+{
+    for (int i = 0; i < (int) segments.size(); ++i)
+        if (getSegmentBounds (i).contains (p))
+            return i;
+    return -1;
+}
+
+void SegmentedControl::paint (juce::Graphics& g)
+{
+    using namespace theme;
     auto bounds = getLocalBounds().toFloat().reduced (0.5f);
     const float r = bounds.getHeight() * 0.5f;
     g.setColour (surfaceSunken);
-    g.fillRoundedRectangle (bounds, r);
+    roadie::theme::fillSquircle (g, bounds, r);
     g.setColour (border);
-    g.drawRoundedRectangle (bounds, r, 1.0f);
+    roadie::theme::drawSquircle (g, bounds, r, 1.0f);
 
-    const float db = 20.0f * std::log10 (std::max (level, 1.0e-6f));
-    const float proportion = juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 60.0f);
-    if (proportion <= 0.0f)
-        return;
+    for (int i = 0; i < (int) segments.size(); ++i)
+    {
+        auto area = getSegmentBounds (i).toFloat();
+        const bool active = i == selected;
+        const float hover = fades[(size_t) i]->get (i == hovered && ! active);
 
-    auto fill = bounds.reduced (1.0f);
-    juce::ColourGradient gradient (ok, fill.getX(), 0.0f, warn, fill.getRight(), 0.0f, false);
-    gradient.addColour (0.92, warn);
-    gradient.addColour (1.0, rec);
-    g.setGradientFill (gradient);
-    g.saveState();
-    g.reduceClipRegion (fill.withWidth (fill.getWidth() * proportion).toNearestInt());
-    g.fillRoundedRectangle (fill, fill.getHeight() * 0.5f);
-    g.restoreState();
+        if (active)
+        {
+            g.setColour (juce::Colours::black.withAlpha (0.25f));
+            roadie::theme::fillSquircle (g, area.translated (0.0f, 1.0f), area.getHeight() * 0.5f);
+            g.setColour (surfaceRaised.brighter (getAppearance() == Appearance::dark ? 0.15f : 0.0f));
+            roadie::theme::fillSquircle (g, area, area.getHeight() * 0.5f);
+            g.setColour (border.brighter (0.3f));
+            roadie::theme::drawSquircle (g, area.reduced (0.5f), area.getHeight() * 0.5f, 1.0f);
+        }
+        else if (hover > 0.0f)
+        {
+            g.setColour (theme::text.withAlpha (0.06f * hover));
+            roadie::theme::fillSquircle (g, area, area.getHeight() * 0.5f);
+        }
+
+        const auto colour = active ? theme::text : textMuted.interpolatedWith (theme::text, hover);
+        // Too narrow for the word: the icon alone (the tooltip names it).
+        const float needed = 14.0f + 16.0f + 6.0f + juce::GlyphArrangement::getStringWidth (fonts::semibold (12.5f), segments[(size_t) i].label) + 10.0f;
+        if (area.getWidth() < needed)
+        {
+            icons::draw (g, segments[(size_t) i].icon, area.withSizeKeepingCentre (16.0f, 16.0f), colour, 2.0f);
+            continue;
+        }
+        auto content = area.reduced (14.0f, 0.0f);
+        icons::draw (g, segments[(size_t) i].icon, content.removeFromLeft (16.0f).withSizeKeepingCentre (16.0f, 16.0f), colour, 2.0f);
+        content.removeFromLeft (6.0f);
+        g.setColour (colour);
+        g.setFont (fonts::semibold (12.5f));
+        g.drawText (segments[(size_t) i].label, content, juce::Justification::centredLeft, false);
+    }
+}
+
+void SegmentedControl::mouseMove (const juce::MouseEvent& e)
+{
+    const int index = segmentAt (e.getPosition());
+    if (index != hovered)
+    {
+        hovered = index;
+        setTooltip (index >= 0 ? segments[(size_t) index].tooltip : juce::String());
+        repaint();
+    }
+}
+
+void SegmentedControl::mouseExit (const juce::MouseEvent&)
+{
+    hovered = -1;
+    repaint();
+}
+
+void SegmentedControl::mouseDown (const juce::MouseEvent& e)
+{
+    const int index = segmentAt (e.getPosition());
+    if (index >= 0 && index != selected)
+    {
+        setSelected (index);
+        if (onChange)
+            onChange (index);
+    }
 }
 
 //==============================================================================
@@ -426,14 +821,26 @@ int StatPill::getIdealWidth() const
                             + fonts::getTabularWidth (fonts::semibold (12.0f), value) + 12.0f);
 }
 
+void StatPill::mouseUp (const juce::MouseEvent& e)
+{
+    if (onClick && getLocalBounds().contains (e.getPosition()))
+        onClick();
+}
+
+void StatPill::mouseEnter (const juce::MouseEvent&)
+{
+    setMouseCursor (onClick ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
+    setRepaintsOnMouseActivity (onClick != nullptr);
+}
+
 void StatPill::paint (juce::Graphics& g)
 {
     using namespace theme;
     auto bounds = getLocalBounds().toFloat().reduced (0.5f);
-    g.setColour (surfaceSunken);
-    g.fillRoundedRectangle (bounds, bounds.getHeight() * 0.5f);
+    g.setColour (onClick && isMouseOver() ? surfaceRaised : surfaceSunken);
+    roadie::theme::fillSquircle (g, bounds, bounds.getHeight() * 0.5f);
     g.setColour (border);
-    g.drawRoundedRectangle (bounds, bounds.getHeight() * 0.5f, 1.0f);
+    roadie::theme::drawSquircle (g, bounds, bounds.getHeight() * 0.5f, 1.0f);
 
     auto inner = bounds.reduced (10.0f, 0.0f);
     g.setColour (dot);
@@ -471,10 +878,10 @@ void MuteSoloButton::paintButton (juce::Graphics& g, bool isOver, bool isDown)
     pressIn (g, bounds, isDown);
 
     g.setColour (lit ? litColour.withAlpha (0.22f + 0.08f * hover) : surfaceSunken.interpolatedWith (surfaceRaised, hover));
-    g.fillRoundedRectangle (bounds, 3.0f);
+    roadie::theme::fillSquircle (g, bounds, 3.0f);
     g.setColour (lit ? litColour : border.interpolatedWith (textMuted, hover));
-    g.drawRoundedRectangle (bounds, 3.0f, 1.0f);
-    g.setColour (lit ? litColour : textFaint.interpolatedWith (textMuted, hover));
+    roadie::theme::drawSquircle (g, bounds, 3.0f, 1.0f);
+    g.setColour (lit ? ink (litColour) : textFaint.interpolatedWith (textMuted, hover));
     g.setFont (fonts::display (8.5f));
     g.drawText (getButtonText(), bounds, juce::Justification::centred, false);
 }

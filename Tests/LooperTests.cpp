@@ -123,6 +123,25 @@ int main()
     looper.process (in.data(), out.data(), 1);
     assert (out[0] == 50.0f);
 
+    // Overdub with a record delay: what is played at head h lands at h − delay,
+    // where the player heard it.
+    std::vector<float> zeros (100, 0.0f);
+    looper.setContent (zeros.data(), 100, 1);
+    looper.setRecordDelay (10);
+    looper.setPlayhead (50);
+    looper.requestOverdub();
+    std::vector<float> pulse (1, 1.0f), one (1, 0.0f);
+    looper.process (pulse.data(), one.data(), 1); // applies the trigger, writes the pulse
+    looper.requestOverdub();
+    looper.process (zeros.data(), one.data(), 1);
+    looper.setPlayhead (40);
+    looper.process (zeros.data(), one.data(), 1);
+    printf ("overdub with 10-sample delay lands at 40: %.2f\n", one[0]);
+    assert (one[0] > 0.97f);
+    looper.setPlayhead (50);
+    looper.process (zeros.data(), one.data(), 1);
+    assert (one[0] == 0.0f);
+
     printf ("ALL LOOPER LOGIC TESTS PASSED\n");
     return 0;
 }

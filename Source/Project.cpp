@@ -127,6 +127,11 @@ bool Project::save (const std::vector<float>& loop, double loopSampleRate, juce:
     amp->setProperty ("trebleDb", trebleDb);
     amp->setProperty ("presenceDb", presenceDb);
     amp->setProperty ("volumeDb", volumeDb);
+    amp->setProperty ("gateOn", gateOn);
+    amp->setProperty ("gateThresholdDb", gateThresholdDb);
+    amp->setProperty ("bypassCapture", bypassCapture);
+    amp->setProperty ("bypassEq", bypassEq);
+    amp->setProperty ("bypassCab", bypassCab);
     root->setProperty ("amp", amp.release());
 
     auto camera = std::make_unique<juce::DynamicObject>();
@@ -134,6 +139,7 @@ bool Project::save (const std::vector<float>& loop, double loopSampleRate, juce:
     root->setProperty ("camera", camera.release());
 
     auto loopObject = std::make_unique<juce::DynamicObject>();
+    loopObject->setProperty ("track", looperTrack);
     if (! loop.empty())
     {
         if (! writeWav (getLoopFile(), loop.data(), (int) loop.size(), loopSampleRate))
@@ -155,8 +161,10 @@ bool Project::save (const std::vector<float>& loop, double loopSampleRate, juce:
     {
         auto take = std::make_unique<juce::DynamicObject>();
         take->setProperty ("name", t.name);
+        take->setProperty ("hidden", t.hidden);
         take->setProperty ("audio", relativePath (t.audioFile, folder));
         take->setProperty ("video", t.videoFile.existsAsFile() ? relativePath (t.videoFile, folder) : juce::String());
+        take->setProperty ("dry", t.dryFile.existsAsFile() ? relativePath (t.dryFile, folder) : juce::String());
         take->setProperty ("audioStartHost", t.audioStartHostSeconds);
         take->setProperty ("videoStartHost", t.videoStartHostSeconds);
         take->setProperty ("syncLagSeconds", t.syncLagSeconds);
@@ -182,6 +190,31 @@ bool Project::save (const std::vector<float>& loop, double loopSampleRate, juce:
     }
     root->setProperty ("takes", takeList);
 
+    if (song.isSet())
+    {
+        auto songObject = std::make_unique<juce::DynamicObject>();
+        songObject->setProperty ("file", relativePath (song.file, folder));
+        songObject->setProperty ("title", song.title);
+        songObject->setProperty ("bpm", song.bpm);
+        songObject->setProperty ("detectedBpm", song.detectedBpm);
+        songObject->setProperty ("firstDownbeat", song.firstDownbeat);
+        songObject->setProperty ("duration", song.duration);
+        juce::Array<juce::var> sectionList;
+        for (const auto& section : song.sections)
+        {
+            auto object = std::make_unique<juce::DynamicObject>();
+            object->setProperty ("start", section.start);
+            object->setProperty ("end", section.end);
+            object->setProperty ("label", section.label);
+            sectionList.add (object.release());
+        }
+        songObject->setProperty ("sections", sectionList);
+        songObject->setProperty ("volumeDb", songVolumeDb);
+        songObject->setProperty ("speed", song.speed);
+        songObject->setProperty ("semitones", song.semitones);
+        root->setProperty ("song", songObject.release());
+    }
+
     // Clips name their take: indices would shift if a take went missing.
     juce::Array<juce::var> clipList;
     for (const auto& c : arrangement.clips)
@@ -201,11 +234,13 @@ bool Project::save (const std::vector<float>& loop, double loopSampleRate, juce:
     arrangementObject->setProperty ("loopAnchor", arrangement.loopAnchor);
     arrangementObject->setProperty ("loopStart", arrangement.loopStart);
     arrangementObject->setProperty ("loopEnd", arrangement.loopEnd);
+    arrangementObject->setProperty ("songStart", arrangement.songStart);
     arrangementObject->setProperty ("cycleOn", cycleOn);
     arrangementObject->setProperty ("cycleStart", cycleStart);
     arrangementObject->setProperty ("cycleEnd", cycleEnd);
     arrangementObject->setProperty ("guitarVolumeDb", guitarVolumeDb);
     arrangementObject->setProperty ("loopVolumeDb", loopVolumeDb);
+    arrangementObject->setProperty ("masterVolumeDb", masterVolumeDb);
     root->setProperty ("arrangement", arrangementObject.release());
 
     const auto json = juce::JSON::toString (juce::var (root.release()));
@@ -245,6 +280,11 @@ bool Project::load (const juce::File& folderOrJson, Project& result,
     p.trebleDb = (float) amp.getProperty ("trebleDb", 0.0);
     p.presenceDb = (float) amp.getProperty ("presenceDb", 0.0);
     p.volumeDb = (float) amp.getProperty ("volumeDb", 0.0);
+    p.gateOn = (bool) amp.getProperty ("gateOn", false);
+    p.gateThresholdDb = (float) amp.getProperty ("gateThresholdDb", -60.0);
+    p.bypassCapture = (bool) amp.getProperty ("bypassCapture", false);
+    p.bypassEq = (bool) amp.getProperty ("bypassEq", false);
+    p.bypassCab = (bool) amp.getProperty ("bypassCab", false);
 
     p.cameraDevice = json["camera"]["device"].toString();
 
@@ -253,6 +293,8 @@ bool Project::load (const juce::File& folderOrJson, Project& result,
     const auto loopFile = resolve (json["loop"]["file"], folder);
     if (loopFile.existsAsFile() && readWav (loopFile, loop, loopSampleRate))
         p.loopLayers = (int) json["loop"].getProperty ("layers", 1);
+    // Older projects had the track from the start.
+    p.looperTrack = (bool) json["loop"].getProperty ("track", p.loopLayers > 0);
 
     if (const auto* takeList = json["takes"].getArray())
     {
@@ -260,8 +302,10 @@ bool Project::load (const juce::File& folderOrJson, Project& result,
         {
             Take take;
             take.name = t["name"].toString();
+            take.hidden = (bool) t["hidden"];
             take.audioFile = resolve (t["audio"], folder);
             take.videoFile = resolve (t["video"], folder);
+            take.dryFile = resolve (t["dry"], folder);
             take.audioStartHostSeconds = (double) t["audioStartHost"];
             take.videoStartHostSeconds = (double) t["videoStartHost"];
             take.syncLagSeconds = (double) t["syncLagSeconds"];
@@ -299,11 +343,13 @@ bool Project::load (const juce::File& folderOrJson, Project& result,
         p.arrangement.loopAnchor = (double) arrangement.getProperty ("loopAnchor", 0.0);
         p.arrangement.loopStart = (double) arrangement.getProperty ("loopStart", 0.0);
         p.arrangement.loopEnd = (double) arrangement.getProperty ("loopEnd", -1.0);
+        p.arrangement.songStart = (double) arrangement.getProperty ("songStart", 0.0);
         p.cycleOn = (bool) arrangement.getProperty ("cycleOn", false);
         p.cycleStart = (double) arrangement.getProperty ("cycleStart", 0.0);
         p.cycleEnd = (double) arrangement.getProperty ("cycleEnd", 0.0);
         p.guitarVolumeDb = (float) arrangement.getProperty ("guitarVolumeDb", 0.0);
         p.loopVolumeDb = (float) arrangement.getProperty ("loopVolumeDb", 0.0);
+        p.masterVolumeDb = (float) arrangement.getProperty ("masterVolumeDb", 0.0);
     }
     else
     {
@@ -319,6 +365,24 @@ bool Project::load (const juce::File& folderOrJson, Project& result,
             p.arrangement.clips.push_back (clip);
             position = std::ceil ((clip.end() + 0.001) / bar) * bar;
         }
+    }
+
+    if (const auto songObject = json["song"]; songObject.isObject())
+    {
+        p.song.file = resolve (songObject["file"], folder);
+        p.song.title = songObject["title"].toString();
+        p.song.bpm = (double) songObject.getProperty ("bpm", p.bpm);
+        p.song.detectedBpm = (double) songObject.getProperty ("detectedBpm", p.song.bpm);
+        p.song.firstDownbeat = (double) songObject["firstDownbeat"];
+        p.song.duration = (double) songObject["duration"];
+        if (const auto* sectionList = songObject["sections"].getArray())
+            for (const auto& section : *sectionList)
+                p.song.sections.push_back ({ (double) section["start"], (double) section["end"], section["label"].toString() });
+        p.songVolumeDb = (float) songObject.getProperty ("volumeDb", -3.0);
+        p.song.speed = juce::jlimit (0.5, 1.0, (double) songObject.getProperty ("speed", 1.0));
+        p.song.semitones = juce::jlimit (-6, 6, (int) songObject.getProperty ("semitones", 0));
+        if (! p.song.file.existsAsFile())
+            p.song = {};
     }
 
     result = std::move (p);
@@ -342,7 +406,12 @@ bool Project::moveTo (const juce::File& newFolder, juce::String& error)
         t.audioFile = newFolder.getChildFile (t.audioFile.getRelativePathFrom (folder));
         if (t.videoFile != juce::File())
             t.videoFile = newFolder.getChildFile (t.videoFile.getRelativePathFrom (folder));
+        if (t.dryFile != juce::File())
+            t.dryFile = newFolder.getChildFile (t.dryFile.getRelativePathFrom (folder));
     }
+
+    if (song.isSet())
+        song.file = newFolder.getChildFile (song.file.getRelativePathFrom (folder));
 
     folder = newFolder;
     name = newFolder.getFileNameWithoutExtension();

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <limits>
+
 #include <atomic>
 #include <cstdint>
 
@@ -20,6 +22,11 @@ public:
     void setEnabled (bool shouldBeEnabled) noexcept { enabled.store (shouldBeEnabled, std::memory_order_relaxed); }
     bool isEnabled() const noexcept { return enabled.load (std::memory_order_relaxed); }
 
+    // Count-in: clicks until the transport reaches `sample`, even with the
+    // metronome off (−1: none).
+    void setCountInEnd (std::int64_t sample) noexcept { countInEnd.store (sample, std::memory_order_relaxed); }
+    std::int64_t getCountInEnd() const noexcept { return countInEnd.load (std::memory_order_relaxed); }
+
     double getSamplesPerBeat() const noexcept;
 
     // Audio-thread only. Adds clicks on top of `samples` for every beat
@@ -28,7 +35,7 @@ public:
 
 private:
     double sampleRate = 48000.0;
-    std::int64_t lastBeatIndex = -1;
+    std::int64_t lastBeatIndex = std::numeric_limits<std::int64_t>::min();
     int clickEnvelopePos = -1;
     int clickLengthSamples = 0;
     bool accentedClick = false;
@@ -36,4 +43,5 @@ private:
     std::atomic<double> bpmAtomic { 100.0 };
     std::atomic<int> beatsPerBarAtomic { 4 };
     std::atomic<bool> enabled { false };
+    std::atomic<std::int64_t> countInEnd { -1 };
 };

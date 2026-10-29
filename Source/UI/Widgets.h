@@ -57,6 +57,10 @@ public:
 
     static constexpr int thickness = 7; // hit area, centred on the panels' border
 
+    // The panel it sizes is folded away: a grip stays visible to pull it back.
+    void setCollapsed (bool shouldShowGrip);
+    bool isCollapsed() const noexcept { return collapsed; }
+
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
@@ -66,7 +70,85 @@ public:
 private:
     Orientation orientation;
     HoverFade fade { *this };
+    bool dragging = false, collapsed = false;
+};
+
+// Volume fader with a console taper: −∞ at the bottom, 0 dB at 75 % of the
+// travel, +6 dB at the top, so the useful range gets most of the throw. The
+// value shows while hovered or dragged. Drag (⇧ for fine), wheel, ⌥-click or
+// double-click for 0 dB.
+class Fader : public juce::Component,
+              public juce::SettableTooltipClient
+{
+public:
+    enum class Orientation
+    {
+        horizontal,
+        vertical
+    };
+
+    Fader (juce::Colour accent, Orientation orientation);
+
+    void setValue (float db);
+    float getValue() const noexcept { return value; }
+    std::function<void (float)> onChange;
+
+    static constexpr float minDb = -60.0f, maxDb = 6.0f; // minDb reads as −∞
+    static float toProportion (float db);
+    static float fromProportion (float proportion);
+    static juce::String format (float db);
+
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void mouseDoubleClick (const juce::MouseEvent&) override;
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+
+private:
+    juce::Rectangle<float> getTrack() const;
+    void set (float db);
+
+    juce::Colour accent;
+    Orientation orientation;
+    float value = 0.0f, proportionAtDragStart = 0.0f;
     bool dragging = false;
+    HoverFade fade { *this };
+};
+
+// Segmented control (Jouer | Monter): each segment an icon and a word, the
+// active one raised in neutral grey — never a module colour.
+class SegmentedControl : public juce::Component,
+                         public juce::SettableTooltipClient
+{
+public:
+    struct Segment
+    {
+        juce::String label;
+        icons::Icon icon;
+        juce::String tooltip;
+    };
+
+    explicit SegmentedControl (std::vector<Segment> segments);
+
+    void setSelected (int index);
+    int getSelected() const noexcept { return selected; }
+    std::function<void (int)> onChange;
+
+    int getIdealWidth() const;
+    juce::Rectangle<int> getSegmentBounds (int index) const;
+
+    void paint (juce::Graphics&) override;
+    void mouseMove (const juce::MouseEvent&) override;
+    void mouseExit (const juce::MouseEvent&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+
+private:
+    int segmentAt (juce::Point<int> p) const;
+
+    std::vector<Segment> segments;
+    int selected = 0, hovered = -1;
+    std::vector<std::unique_ptr<HoverFade>> fades;
 };
 
 // Round icon button: the transport cluster, toolbar actions.
@@ -161,16 +243,40 @@ private:
     juce::String caption, unit = " dB";
 };
 
-// Horizontal level meter: ok → warn gradient, red near clipping.
+// Level meter, −60 to +3 dBFS: green → yellow → red, a peak line held for
+// 1.5 s, and a clip light that stays on until clicked. Animated on the
+// display's refresh (VBlank), fed with block peaks at any rate.
 class Meter : public juce::Component,
               public juce::SettableTooltipClient
 {
 public:
+    enum class Orientation
+    {
+        horizontal,
+        vertical
+    };
+
+    Meter() = default;
+    explicit Meter (Orientation o) : orientation (o) {}
+
+    void setOrientation (Orientation o) { orientation = o; repaint(); }
     void setLevel (float linear);
+    bool isClipped() const noexcept { return clipped; }
+    void resetClip();
+
+    static float toProportion (float linear);
+
     void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override { resetClip(); }
 
 private:
-    float level = 0.0f, displayed = 0.0f;
+    void tick();
+
+    Orientation orientation = Orientation::horizontal;
+    float target = 0.0f, displayed = 0.0f, peak = 0.0f;
+    double peakTime = 0.0, lastTick = 0.0;
+    bool clipped = false;
+    juce::VBlankAttachment vblank { this, [this] { tick(); } };
 };
 
 // Rounded status pill: dot + label + strong value (CPU Faible, Latence 7.8 ms).
@@ -181,6 +287,11 @@ public:
     void setContent (const juce::String& label, const juce::String& value, juce::Colour dot);
     int getIdealWidth() const;
     void paint (juce::Graphics&) override;
+
+    // Set: the pill is a button (hover tint, pointing hand).
+    std::function<void()> onClick;
+    void mouseUp (const juce::MouseEvent& e) override;
+    void mouseEnter (const juce::MouseEvent&) override;
 
 private:
     juce::String label, value;

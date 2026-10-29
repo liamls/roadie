@@ -49,6 +49,12 @@ Shape make (Icon icon)
         case Icon::waveform:    return { svg ({ "M3 12h2", "M7 8v8", "M11 4v16", "M15 7v10", "M19 10v4" }) };
         case Icon::cycle:       return { svg ({ "M4 11V9a3 3 0 0 1 3-3h12", "M16 3l3 3-3 3", "M20 13v2a3 3 0 0 1-3 3H5", "M8 21l-3-3 3-3" }) };
         case Icon::library:     p.addRoundedRectangle (3.0f, 4.0f, 18.0f, 16.0f, 2.5f); p.addPath (svg ({ "M9 4v16", "M5.5 8h1.5", "M5.5 11h1.5" })); return { p };
+        case Icon::timeline:    return { svg ({ "M3 6h9", "M15 6h6", "M3 12h5", "M11 12h10", "M3 18h12", "M18 18h3" }) };
+        case Icon::song:        p = svg ({ "M9 18V5l11-2v13" }); p.addEllipse (3.0f, 15.0f, 6.0f, 6.0f); p.addEllipse (14.0f, 13.0f, 6.0f, 6.0f); return { p };
+        case Icon::tuner:       return { svg ({ "M3 17a9 9 0 0 1 18 0", "M12 17l4-7", "M12 4v2", "M5.6 7.6l1.4 1.4", "M18.4 7.6l-1.4 1.4" }) };
+        case Icon::monitor:     p.addRoundedRectangle (2.0f, 4.0f, 20.0f, 13.0f, 2.0f); p.addPath (svg ({ "M8 21h8", "M12 17v4" })); return { p };
+        case Icon::power:       return { svg ({ "M12 3v8", "M6.3 6.3a8 8 0 1 0 11.4 0" }) };
+        case Icon::arrow:       return { svg ({ "M4 12h15", "M14 7l5 5-5 5" }) };
         case Icon::inspector:   p.addRoundedRectangle (3.0f, 4.0f, 18.0f, 16.0f, 2.5f); p.addPath (svg ({ "M3 14h18", "M8 17h0.01", "M12 17h0.01", "M16 17h0.01" })); return { p };
     }
 

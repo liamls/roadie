@@ -3,13 +3,19 @@
 #include "../Session.h"
 #include "Widgets.h"
 
-// Centre of the window, laid out like GarageBand's tracks area:
+// The tracks, laid out like an NLE over a DAW:
 //
 //   ┌ zoom ─────────┬ ruler: cycle band (yellow) + bar numbers ───────────┐
+//   │ Vidéo    M    │ thin band: the video of the Guitare regions (linked) │
 //   │ Guitare  M S  │ regions of the takes (waveform), red while recording │
 //   │ Looper   M S  │ the loop region, notched at each repeat              │
-//   │ Caméra   M    │ the video of the Guitare regions (linked)            │
-//   └───────────────┴ scrollbar ──────────────────────── camera monitor ───┘
+//   │ Morceau  M S  │ the backing track, its parts (Intro, A, B…) on top   │
+//   │ Master  ──○── │ (the whole output: fader, stereo meter)              │
+//   └───────────────┴ scrollbar ─────────────────────────────────────────────┘
+//
+// Each track's height is dragged by the bottom edge of its header
+// (double-click: default) and all of them zoom together (⌥⌘↑ / ⌥⌘↓); when
+// they don't fit, they shrink together.
 //
 // Regions are moved by dragging (snapped to the grid, ⌘ to move freely,
 // ⌥ to duplicate) and trimmed by their edges; right-click for the rest.
@@ -27,6 +33,8 @@ public:
     std::function<void (Track)> onTrackSelected;
     std::function<void()> onCameraClicked;
     std::function<void()> onExportRequested; // "Exporter cette région…"
+    std::function<void()> onImportSong;      // "Choisir un morceau…"
+    std::function<void()> onImportYouTube;   // "Importer depuis YouTube…"
 
     void setSelectedTrack (Track track);
     Track getSelectedTrack() const noexcept { return selected; }
@@ -38,6 +46,16 @@ public:
     // playhead is out of view); factor > 1 zooms in.
     void zoomBy (double factor);
     void zoomToFit();
+
+    // Track heights (the desired ones; they shrink together when the panel
+    // is too short). Reported on mouse up, to be saved.
+    void setTrackHeight (Track track, int height);
+    int getTrackHeight (Track track) const;
+    void zoomTracks (float factor);
+    juce::String getTrackHeightsState() const;
+    void setTrackHeightsState (const juce::String& state);
+    std::function<void()> onTrackHeightsChanged;
+    static int defaultTrackHeight (Track track) { return track == Track::camera ? 52 : 92; }
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -59,15 +77,15 @@ public:
     juce::Point<int> getLanePoint (Track track, double seconds) const;
     juce::Point<int> getRulerPoint (double seconds, bool cycleBand) const;
     double getPixelsPerSecond() const noexcept { return pixelsPerSecond; }
+    int getTimelineLaneHeight (Track track) const noexcept { return rowHeightOf (track); }
 
 private:
     class TrackHeader;
-    class MiniFader;
+    class MasterHeader;
     class ZoomControl;
     class Ruler;
     class ArrangeView;
     class Overlay;
-    class CameraMonitor;
 
     // View mapping, in lane coordinates (x = 0 at the left of the lanes).
     float timeToX (double seconds) const noexcept { return (float) ((seconds - viewStart) * pixelsPerSecond); }
@@ -75,7 +93,12 @@ private:
     double getVisibleLength() const noexcept;
     double getGridStep() const;
     double snap (double seconds, bool enabled) const;
-    int getRowHeight() const noexcept { return rowHeight; }
+    // Where a click puts the playhead: on the grid when it lands within a few
+    // pixels of it (the magnet, if on), exactly where it was clicked otherwise.
+    double snapPlayhead (double seconds, bool freely) const;
+    int rowTop (Track track) const noexcept;
+    int rowHeightOf (Track track) const noexcept;
+    int lanesBottom() const noexcept;
     int laneWidth() const noexcept { return std::max (1, getWidth() - headerWidth); }
 
     void setView (double start, double pps);
@@ -93,21 +116,29 @@ private:
     Session& session;
     Track selected = Track::amp;
     int headerWidth = defaultHeaderWidth, headerWidthAtDragStart = defaultHeaderWidth;
-    int rowHeight = 80;
+    std::array<int, 4> trackHeights { 92, 92, 52, 92 }; // by Track value: amp, loop, camera, song
+    std::array<int, 4> rowHeights {}, rowTops {};
 
     double viewStart = 0.0, pixelsPerSecond = 40.0;
     bool viewInitialised = false;
     double lastUserScroll = -10.0;
     float hoverX = -1.0f;
     std::vector<double> lastSignature;
+    juce::String shownSong;
 
     std::vector<std::unique_ptr<TrackHeader>> headers;
+    std::unique_ptr<MasterHeader> master;
     std::unique_ptr<ZoomControl> zoom;
     std::unique_ptr<Ruler> ruler;
     std::unique_ptr<ArrangeView> arrange;
     std::unique_ptr<Overlay> overlay;
-    std::unique_ptr<CameraMonitor> monitor;
     juce::ScrollBar scrollbar { false };
+    // The Looper track is not there by default: this adds it.
+    roadie::ui::PillButton addLooperButton { "Piste Looper", roadie::ui::PillButton::Variant::tinted, roadie::theme::loopAccent, roadie::icons::Icon::plus };
+    bool isShown (Track track) const;
+public:
+    void confirmRemoveLooperTrack();
+private:
+    static constexpr int addRowHeight = 38;
     roadie::ui::Splitter headerSplitter { roadie::ui::Splitter::Orientation::vertical };
-    bool monitorPlaced = false;
 };

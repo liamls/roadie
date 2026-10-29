@@ -36,18 +36,18 @@ public:
         const bool selected = getToggleState();
 
         g.setColour (selected ? exportAccent.withAlpha (0.10f) : (isOver ? surfaceRaised.brighter (0.05f) : surfaceRaised));
-        g.fillRoundedRectangle (bounds, radiusMd);
+        roadie::theme::fillSquircle (g, bounds, radiusMd);
         g.setColour (selected ? exportAccent : border);
-        g.drawRoundedRectangle (bounds, radiusMd, 1.0f);
+        roadie::theme::drawSquircle (g, bounds, radiusMd, 1.0f);
 
         auto content = bounds.reduced (8.0f, 9.0f);
         auto label = content.removeFromBottom (16.0f);
         const auto frame = isPortrait ? juce::Rectangle<float> (18.0f, 30.0f) : juce::Rectangle<float> (32.0f, 18.0f);
         auto swatch = frame.withCentre (content.getCentre());
         g.setColour (surfaceSunken);
-        g.fillRoundedRectangle (swatch, 3.0f);
+        roadie::theme::fillSquircle (g, swatch, 3.0f);
         g.setColour (selected ? exportAccent : border);
-        g.drawRoundedRectangle (swatch, 3.0f, 1.0f);
+        roadie::theme::drawSquircle (g, swatch, 3.0f, 1.0f);
 
         g.setColour (selected ? theme::text : textMuted);
         g.setFont (fonts::semibold (12.5f));
@@ -100,7 +100,11 @@ ExportSheet::ExportSheet (Session& s)
 
     burnInToggle.setButtonText (utf8 ("Incruster le titre dans la vid\xc3\xa9o"));
     mirrorToggle.setButtonText (utf8 ("Image miroir (comme le moniteur)"));
-    for (auto* t : { &burnInToggle, &mirrorToggle })
+    songToggle.setButtonText (utf8 ("Avec le morceau (d\xc3\xa9" "coch\xc3\xa9 : guitare seule)"));
+    songToggle.setTooltip (utf8 ("Certaines plateformes coupent le son des titres prot\xc3\xa9g\xc3\xa9s : exporte alors la guitare seule"));
+    songToggle.setToggleState (true, juce::dontSendNotification);
+    songToggle.onClick = [this] { updateEnablement(); };
+    for (auto* t : { &burnInToggle, &mirrorToggle, &songToggle })
     {
         t->setColour (juce::ToggleButton::tickColourId, theme::exportAccent);
         t->setWantsKeyboardFocus (false);
@@ -237,6 +241,7 @@ Session::ExportRequest ExportSheet::buildRequest() const
     request.title = titleEditor.getText();
     request.burnInTitle = burnInToggle.getToggleState();
     request.mirror = mirrorToggle.getToggleState();
+    request.includeSong = ! session.hasSong() || songToggle.getToggleState();
 
     // An untouched slider means "the whole range" (no narrower trim).
     const bool trimmed = trimSlider.getMinValue() > 0.05 || trimSlider.getMaxValue() < trimSlider.getMaximum() - 0.05;
@@ -261,7 +266,14 @@ void ExportSheet::updateEnablement()
     else if (hasContent && ! hasVideo && status == Status::idle)
         statusMessage = utf8 ("Cette plage n'a pas de vid\xc3\xa9o (cam\xc3\xa9ra \xc3\xa9teinte) \xe2\x80\x94 exporte l'audio seul.");
     else if (status == Status::idle)
-        statusMessage.clear();
+    {
+        // What to expect: about 1.2 MB per second at this quality.
+        const auto request = buildRequest();
+        const double seconds = request.endSeconds - request.startSeconds;
+        statusMessage = juce::String (juce::roundToInt (seconds)) + utf8 (" s \xc2\xb7 environ ")
+                        + juce::String (std::max (1, juce::roundToInt (seconds * 1.2))) + utf8 ("\xc2\xa0Mo")
+                        + (session.hasSong() && ! songToggle.getToggleState() ? utf8 (" \xc2\xb7 guitare seule") : juce::String());
+    }
     repaint();
 }
 
@@ -347,9 +359,9 @@ void ExportSheet::paint (juce::Graphics& g)
 
     juce::DropShadow (juce::Colours::black.withAlpha (0.5f), 40, { 0, 20 }).drawForRectangle (g, sheet);
     g.setColour (surface);
-    g.fillRoundedRectangle (sheet.toFloat(), radiusLg);
+    roadie::theme::fillSquircle (g, sheet.toFloat(), radiusLg);
     g.setColour (border);
-    g.drawRoundedRectangle (sheet.toFloat().reduced (0.5f), radiusLg, 1.0f);
+    roadie::theme::drawSquircle (g, sheet.toFloat().reduced (0.5f), radiusLg, 1.0f);
 
     g.setColour (text);
     g.setFont (fonts::display (17.0f));
@@ -374,9 +386,9 @@ void ExportSheet::paint (juce::Graphics& g)
         const float progress = session.getExporter().getProgress();
         auto bar = progressArea.toFloat();
         g.setColour (surfaceSunken);
-        g.fillRoundedRectangle (bar, bar.getHeight() * 0.5f);
+        roadie::theme::fillSquircle (g, bar, bar.getHeight() * 0.5f);
         g.setColour (exportAccent);
-        g.fillRoundedRectangle (bar.withWidth (std::max (bar.getHeight(), bar.getWidth() * progress)), bar.getHeight() * 0.5f);
+        roadie::theme::fillSquircle (g, bar.withWidth (std::max (bar.getHeight(), bar.getWidth() * progress)), bar.getHeight() * 0.5f);
         g.setColour (textMuted);
         g.setFont (fonts::semibold (12.0f));
         fonts::drawTabular (g, statusMessage + " " + juce::String (juce::roundToInt (progress * 100.0f)) + " %",
@@ -384,7 +396,7 @@ void ExportSheet::paint (juce::Graphics& g)
     }
     else if (statusMessage.isNotEmpty())
     {
-        g.setColour (status == Status::failed ? warn : (status == Status::done ? ok : textMuted));
+        g.setColour (status == Status::failed ? ink (warn) : (status == Status::done ? ink (ok) : textMuted));
         g.setFont (fonts::semibold (12.0f));
         g.drawFittedText (statusMessage, statusArea, juce::Justification::centredLeft, 2);
     }
@@ -393,7 +405,8 @@ void ExportSheet::paint (juce::Graphics& g)
 void ExportSheet::resized()
 {
     const int width = std::min (440, getWidth() - 40);
-    const int height = 610;
+    songToggle.setVisible (session.hasSong());
+    const int height = session.hasSong() ? 634 : 610;
     sheet = getLocalBounds().withSizeKeepingCentre (width, std::min (height, getHeight() - 40));
 
     auto area = sheet.reduced (20);
@@ -425,6 +438,8 @@ void ExportSheet::resized()
     area.removeFromTop (10);
     burnInToggle.setBounds (area.removeFromTop (24));
     mirrorToggle.setBounds (area.removeFromTop (24));
+    if (session.hasSong())
+        songToggle.setBounds (area.removeFromTop (24));
     area.removeFromTop (14);
 
     exportButton.setBounds (area.removeFromTop (44));
