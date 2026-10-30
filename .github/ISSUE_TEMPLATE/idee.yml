@@ -1,0 +1,14 @@
+name: Idée
+description: Une fonction, un réglage, un geste qui manque
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: Le besoin
+      description: Ce que tu essaies de faire quand tu joues ou montes, et ce qui te gêne aujourd'hui.
+    validations: { required: true }
+  - type: textarea
+    id: idea
+    attributes:
+      label: Ce qui t'aiderait

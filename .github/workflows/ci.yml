@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The JUCE-free parts (looper, DSP, autosave rule): seconds, no submodules.
+  portable-tests:
+    name: Looper + DSP tests (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run
+        run: |
+          set -euxo pipefail
+          c++ -std=c++20 -O2 -UNDEBUG -ISource Tests/LooperTests.cpp Source/Looper.cpp -o looper_tests
+          c++ -std=c++20 -O2 -UNDEBUG -ISource Tests/DspTests.cpp \
+            Source/TimeStretch.cpp Source/Tuner.cpp Source/NoiseGate.cpp Source/ToneStack.cpp \
+            Source/SyncAnalysis.cpp Source/SongAnalysis.cpp Source/Metronome.cpp -o dsp_tests
+          ./looper_tests
+          ./dsp_tests
+
+  shellcheck:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck Tools/*.sh
+
+  # The real thing: the app, and the engine tests (fake audio device, real NAM
+  # capture, MP4 export). arm64 and Intel, since Roadie ships for both.
+  macos:
+    name: Build + tests (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15, arch: arm64 }
+          - { runner: macos-15-intel, arch: x86_64 }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: macos-${{ matrix.arch }}
+          max-size: 600M
+      - name: Configure
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_OBJCXX_COMPILER_LAUNCHER=ccache
+      - name: Build
+        run: cmake --build build --target Roadie RoadieLooperTests RoadieDspTests RoadieEngineTests -j "$(sysctl -n hw.ncpu)"
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Check the bundle
+        run: |
+          APP=build/Roadie_artefacts/Release/Roadie.app
+          test -x "$APP/Contents/MacOS/Roadie"
+          test -x "$APP/Contents/Resources/yt-dlp"
+          codesign --verify --deep --strict "$APP"
+
+  # One required check for branch protection.
+  ci-ok:
+    name: CI OK
+    if: always()
+    needs: [portable-tests, shellcheck, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All jobs must have succeeded
+        run: |
+          [[ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" == "false" ]]

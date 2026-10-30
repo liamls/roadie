@@ -1,130 +1,121 @@
-# Roadie
+<p align="center">
+  <img src="docs/logo/roadie-icon.svg" width="112" alt="Roadie">
+</p>
 
-> Appli guitare tout-en-un : ampli basé sur des captures NAM, looper, et (bientôt) caméra synchronisée — pour filmer, jouer et exporter un clip sans jongler entre un DAW, OBS et un simulateur d'ampli.
+<h1 align="center">Roadie</h1>
 
-Nom provisoire. POC en cours de construction. Ce document existe pour que n'importe quelle machine (ou n'importe quelle session Claude) qui récupère ce dépôt ait tout le contexte nécessaire pour continuer, sans dépendre des notes Obsidian du développeur (qui ne suivent pas le dépôt).
+<p align="center">
+  <b>Branche-toi. Joue. Sors le clip.</b><br>
+  Ampli, looper, caméra synchronisée, montage et export : tout le backstage du guitariste qui filme,<br>
+  dans une seule appli. Plus de DAW, d'OBS et de simulateur d'ampli à jongler.
+</p>
+
+<p align="center">
+  <a href="https://github.com/liamls/roadie/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/liamls/roadie/ci.yml?branch=main&style=flat-square&label=CI"></a>
+  <img alt="macOS 15" src="https://img.shields.io/badge/macOS-15-1f1f1f?style=flat-square&logo=apple&logoColor=white">
+  <img alt="Statut : bêta" src="https://img.shields.io/badge/statut-b%C3%AAta-f9853b?style=flat-square">
+  <a href="LICENSE"><img alt="Licence AGPLv3" src="https://img.shields.io/badge/licence-AGPLv3-3a3a3a?style=flat-square"></a>
+  <img alt="C++20 · JUCE" src="https://img.shields.io/badge/C%2B%2B20-JUCE-47dab4?style=flat-square">
+</p>
+
+<p align="center">
+  <a href="https://github.com/liamls/roadie/releases/latest"><b>Télécharger</b></a> ·
+  <a href="#le-parcours-en-cinq-gestes">Le parcours</a> ·
+  <a href="#ce-quil-y-a-dans-la-boîte">Fonctions</a> ·
+  <a href="#compiler">Compiler</a> ·
+  <a href="docs/usage.md">Raccourcis</a> ·
+  <a href="ROADMAP.md">Roadmap</a>
+</p>
+
+<p align="center">
+  <img src="docs/screenshot.png" alt="Roadie : bibliothèque de captures, pistes Guitare, Looper et Caméra, timeline avec régions, ampli en bas" width="100%">
+</p>
 
 ---
 
-## 1. État du projet (26/10/2026)
+## Le parcours en cinq gestes
 
-| Jalon | Statut |
-|---|---|
-| 0 — Préparation | ✅ Clos |
-| 1 — Prototype audio | ✅ Clos (carte son, NAM, IR, latence, CPU) |
-| 2 — Maquette design | ✅ Clos (direction visuelle définie, mockup HTML interactif) |
-| 3 — Looper | 🟡 Looper + métronome faits et testés. Export projet complet pas tranché (format ouvert) |
-| 4 — Webcam + synchro | 🔴 **Bloqué sur Linux** — voir §4 |
-| 5 — Export clip | 🟡 Export WAV de la boucle fait. Export vidéo bloqué (dépend du Jalon 4) |
-| 6 — Interface finale | ⚪ Pas commencé — l'UI actuelle est fonctionnelle mais minimale (deux cartes empilées), pas encore l'interface façon DAW du mockup |
+1. **Branche-toi.** Choisis une capture d'ampli [NAM](https://www.neuralampmodeler.com) et une réponse d'impulsion de baffle, règle ton son : gain, noise gate, égaliseur, volume. Latence de l'ordre de 10 ms attendue avec une interface audio.
+2. **Importe un morceau** (fichier ou lien YouTube) : Roadie détecte le tempo, la première mesure et les parties (Intro, A, B…). Ralentis-le jusqu'à 50 %, transpose-le, boucle une partie.
+3. **Joue.** Enregistre une boucle, empile des couches, puis lance une **prise** audio + vidéo après un décompte. La caméra est calée sur le son grâce à une calibration mesurée.
+4. **Monte** comme dans GarageBand : déplace, rogne, coupe, duplique les régions, dessine un cycle, annule tout avec ⌘Z.
+5. **Sors le clip** : MP4 vertical 9:16 ou horizontal 16:9, titre incrusté, avec ou sans le morceau, ou l'audio seul en WAV.
 
-L'appli compile et tourne (testée sur Linux/PipeWire). Chaîne audio temps réel validée : Scarlett → gain → NAM → IR → volume → sortie, ~10 ms de latence aller-retour, 0 craquement.
+## Ce qu'il y a dans la boîte
 
----
+<table>
+  <tr>
+    <td width="33%" valign="top">
+      <h4>🎸 Un vrai ampli</h4>
+      Captures NAM (WaveNet, LSTM, Slimmable), égaliseur Grave / Médium / Aigu / Présence, baffle par IR, noise gate, contournement par bloc. Le niveau est normalisé : changer de capture ne fait pas sauter le volume.
+    </td>
+    <td width="33%" valign="top">
+      <h4>🔁 Looper et morceaux</h4>
+      Enregistrer → boucler → overdub, annuler une couche, métronome calé sur le transport. Morceaux d'accompagnement MP3 / M4A / WAV / AIFF / FLAC avec tempo et parties détectés.
+    </td>
+    <td width="33%" valign="top">
+      <h4>🎥 Caméra synchronisée</h4>
+      Webcam, caméra USB ou iPhone (Continuity Camera). Une calibration de 5 secondes mesure le décalage entre ta carte son et la caméra, appliqué ensuite à chaque prise.
+    </td>
+  </tr>
+  <tr>
+    <td width="33%" valign="top">
+      <h4>✂️ Montage façon DAW</h4>
+      Régions éditables, aimantation à la grille, zone de cycle, zoom, 200 niveaux d'annulation. Deux espaces : <b>Jouer</b> (moniteur, pédale Looper) et <b>Monter</b> (timeline dominante).
+    </td>
+    <td width="33%" valign="top">
+      <h4>🎬 Export en un clic</h4>
+      H.264 / AAC avec l'encodeur matériel du Mac, 9:16 ou 16:9, découpe sur la plage voulue, titre incrusté, estimation de la taille avant de lancer.
+    </td>
+    <td width="33%" valign="top">
+      <h4>🛡️ Tes prises sont en sécurité</h4>
+      Sauvegarde automatique après chaque modification, copie de secours du projet, prises écrites directement sur disque pendant l'enregistrement. Un projet est un simple dossier lisible dans le Finder.
+    </td>
+  </tr>
+</table>
 
-## 2. Build
+Interface sombre ou claire, panneaux repliables et redimensionnables, taille de 80 à 125 %, accordeur intégré, vumètres avec témoin de saturation.
 
-### Dépendances
+## Télécharger
 
-**Linux** (testé sur Ubuntu 24.04) :
+Les versions se trouvent dans l'onglet [Releases](https://github.com/liamls/roadie/releases). Ouvre le `.dmg`, glisse Roadie dans Applications, et autorise la caméra et le micro au premier lancement.
+
+> [!NOTE]
+> La bêta est pour l'instant **macOS uniquement** (la caméra et l'export passent par AVFoundation). Le moteur audio et l'interface compilent sous Linux, sans caméra ; Windows n'est pas encore testé. Voir la [roadmap](ROADMAP.md).
+
+> [!WARNING]
+> L'import par lien YouTube s'appuie sur [yt-dlp](https://github.com/yt-dlp/yt-dlp), à réserver à un usage personnel : le téléchargement n'est en général pas autorisé par les conditions d'utilisation de YouTube. Les titres d'Apple Music ou de Spotify sont protégés et ne se lisent pas.
+
+## Compiler
+
 ```bash
-sudo apt-get install -y cmake libasound2-dev libjack-jackd2-dev libcurl4-openssl-dev \
-  libfreetype6-dev libx11-dev libxcomposite-dev libxcursor-dev libxext-dev \
-  libxinerama-dev libxrandr-dev libxrender-dev libfontconfig-dev libxi-dev
-```
-(`build-essential` doit déjà être installé pour g++/gcc.)
-
-**macOS** : Xcode + CMake (`brew install cmake`). Pas encore testé sur cette machine — c'est justement l'objet du passage sur Mac.
-
-**Windows** : Visual Studio 2022 + CMake. Pas encore testé.
-
-### Compiler
-
-```bash
-git submodule update --init --recursive   # récupère JUCE + NeuralAmpModelerCore (et leurs propres sous-modules)
+brew install cmake
+git clone --recursive https://github.com/liamls/roadie.git
+cd roadie
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target Roadie -j
+open build/Roadie_artefacts/Release/Roadie.app
 ```
 
-⚠️ **Toujours compiler en `Release`**. En Debug, le moteur NAM (calcul matriciel Eigen) tourne sans optimisation et sature le CPU — c'est la première cause de craquements qu'on a rencontrée. `-O3` seul (sans LTO, voir §5) suffit largement.
+Les Command Line Tools suffisent (pas besoin de Xcode). **Toujours compiler en `Release`** : en Debug, le moteur NAM sature le CPU. Tests, outils de vérification de l'interface et dépannage : [docs/building.md](docs/building.md).
 
-Binaire : `build/Roadie_artefacts/Release/Roadie` sur Linux. Sur Mac, Xcode génère probablement un bundle `.app` au même niveau — à vérifier.
-
-### Outils de vérification (pas besoin de JUCE)
-
-- `Tools/nam_bench.cpp` — benchmark de charge CPU d'une capture NAM à différentes tailles de buffer. Utile pour retrouver la bonne taille de buffer sur une nouvelle machine :
-  ```bash
-  g++ -std=gnu++20 -O3 -DNAM_SAMPLE_FLOAT=1 \
-    -Ilibs/NeuralAmpModelerCore -Ilibs/NeuralAmpModelerCore/Dependencies/eigen -Ilibs/NeuralAmpModelerCore/Dependencies/nlohmann \
-    Tools/nam_bench.cpp libs/NeuralAmpModelerCore/NAM/*.cpp libs/NeuralAmpModelerCore/NAM/wavenet/*.cpp \
-    -o /tmp/nam_bench
-  /tmp/nam_bench chemin/vers/capture.nam 64 44100
-  ```
-- `Tests/LooperTests.cpp` — teste la logique du looper (record/play/overdub/undo/clear) indépendamment de JUCE :
-  ```bash
-  g++ -std=c++20 -O2 -ISource Tests/LooperTests.cpp Source/Looper.cpp -o /tmp/looper_test && /tmp/looper_test
-  ```
-  À relancer après toute modification de `Source/Looper.cpp`.
-
----
-
-## 3. Architecture
-
-```
-Guitare → AmpEngine (gain → NAM → IR → volume) → Looper (enregistre/rejoue) → Metronome (clic, monitoring only) → sortie
+```bash
+cmake --build build --target RoadieLooperTests RoadieDspTests RoadieEngineTests -j
+ctest --test-dir build --output-on-failure
 ```
 
-- **`Source/MainComponent`** — `juce::AudioAppComponent`, possède le device audio et l'UI, orchestre la chaîne ci-dessus dans `getNextAudioBlock`.
-- **`Source/AmpEngine`** — charge une capture `.nam` (NeuralAmpModelerCore) et une IR de cabinet (`juce::dsp::Convolution`), applique gain d'entrée/volume de sortie, mesure le niveau crête. Swap de modèle thread-safe (chargement hors thread audio, lecture protégée par `SpinLock` + `TryLock` côté callback — jamais de blocage du thread audio).
-- **`Source/Looper`** — looper mono temps-réel-safe, **volontairement sans dépendance JUCE** (seulement `std::`) pour rester testable en isolation. Buffer pré-alloué à `prepare()`, jamais réalloué. Les transitions d'état (Record/Overdub/Undo/Clear) sont demandées depuis le thread UI via des triggers atomiques et appliquées sur le thread audio en tout début de `process()`.
-- **`Source/Metronome`** — clic synthétisé, mixé au monitoring uniquement, jamais enregistré dans la boucle.
-- **`Source/RoadieLookAndFeel` + `Source/Theme.h`** — direction visuelle (voir `docs/design-direction.md`).
+## Pour aller plus loin
 
-### Sous-modules
-
-- `libs/JUCE` — épinglé sur `9.0.4`
-- `libs/NeuralAmpModelerCore` — épinglé sur `v0.6.0`. Les sources `NAM/*.cpp` et `NAM/wavenet/*.cpp` sont compilées directement dans la cible (pas de `add_subdirectory`, le `CMakeLists.txt` racine du dépôt NAM ne définit pas de cible réutilisable). Dépendances imbriquées : Eigen et `nlohmann/json` (sous `Dependencies/`), `AudioDSPTools` (présent mais **pas utilisé** — on a préféré `juce::dsp::Convolution` pour l'IR, plus simple et plus cohérent avec le reste du code JUCE).
-
----
-
-## 4. Blocage connu : caméra sur Linux
-
-JUCE (`juce_video` module) n'a **aucun backend caméra pour Linux** — seulement macOS (`AVFoundation`), iOS, Windows (`DirectShow`/Media Foundation) et Android. Vérifié dans les sources JUCE 9.0.4 : `libs/JUCE/modules/juce_video/native/` ne contient que `juce_CameraDevice_mac.h`, `_ios.h`, `_windows.h`, `_android.h` — pas de variante Linux.
-
-Conséquence : le Jalon 4 (webcam + synchro) et la partie vidéo du Jalon 5 (export) n'ont pas pu être développés ni testés sur la machine de dev Linux. Classe `juce::CameraDevice` à utiliser une fois sur Mac/Windows — API : `CameraDevice::getAvailableDevices()`, `CameraDevice::openDevice(...)`, `createViewerComponent()` pour la prévisualisation.
-
----
-
-## 5. Décisions techniques notables
-
-| Décision | Raison |
+| | |
 |---|---|
-| Pas de LTO (`juce_recommended_lto_flags` retiré du `CMakeLists.txt`) | ~35 min de lien pour un gain marginal sur ce projet (beaucoup de templates Eigen/NAM) ; `-O3` seul suffit |
-| `NAM_SAMPLE_FLOAT` défini | Les buffers audio JUCE sont en `float` ; sans ça, NAM utilise `double` par défaut et il faudrait convertir à chaque bloc |
-| Buffer audio forcé à 64 échantillons au démarrage | Défaut système (PipeWire) mesuré à ~81 ms de latence round-trip ; le moteur NAM ne coûte que 6-8 % CPU même à 32 échantillons (voir `Tools/nam_bench.cpp`), donc rien ne justifiait un buffer aussi gros. Réglable par l'utilisateur via le bouton Réglages |
-| Découpage défensif dans `AmpEngine::process` (jamais plus de `currentMaxBlockSize` échantillons passés à NAM/Convolution en un appel) | Bug réel trouvé : certains backends audio (ex. PipeWire en récupération d'xrun) peuvent agrandir la taille de bloc sans rappel de `prepareToPlay`. NAM/Convolution ont des buffers internes dimensionnés au maximum annoncé à `Reset()`/`prepare()` ; dépasser cette taille écrit hors limites. Les `assert()` qui l'auraient détecté sont désactivés en Release (`NDEBUG`) |
-| IR via `juce::dsp::Convolution` plutôt que `ImpulseResponse` d'AudioDSPTools | API plus ancienne (`double**`, hérite de `dsp::History`), moins cohérente avec le reste du code JUCE/`float` |
-| `Looper` sans dépendance JUCE | Testable en isolation avec un simple `g++`, sans compiler tout le projet — a permis de trouver et corriger un bug de thread-safety (`undoAvailable` en `bool` simple au lieu d'`atomic<bool>`) avant même de lancer l'UI |
+| [Utilisation et raccourcis](docs/usage.md) | Le parcours complet et tous les raccourcis clavier et souris |
+| [Architecture](docs/architecture.md) | Le moteur temps réel, la session, l'interface, et les décisions techniques |
+| [Synchro audio / vidéo](docs/sync-audio-video.md) | Comment la guitare et l'image restent calées |
+| [Format de projet](docs/project-format.md) | Le dossier `.roadie` |
+| [Compiler](docs/building.md) · [Publier une version](docs/releasing.md) | Build, tests, signature, notarisation, DMG, CI |
+| [Roadmap](ROADMAP.md) · [Journal des changements](CHANGELOG.md) | Où on en est, ce qui vient |
+| [Contribuer](CONTRIBUTING.md) · [Sécurité](SECURITY.md) | Règles du dépôt, signaler une faille |
 
----
+## Licence
 
-## 6. Contrôles
-
-| Action | Raccourci |
-|---|---|
-| Lecture / pause de la boucle | Espace |
-| Enregistrer / stop | R |
-| Overdub | O |
-| Annuler (un niveau) | U |
-| Effacer la boucle | Maj + Retour arrière |
-| Réinitialiser un potard / le tempo | Double-clic |
-
----
-
-## 7. Pour la suite (sur Mac)
-
-1. **Caméra** (Jalon 4) — implémenter `juce::CameraDevice`, prévisualisation live, calibration de synchro (clap/flash) avec l'audio. C'est la raison principale du passage sur Mac.
-2. **Interface finale** (Jalon 6) — l'UI actuelle (deux cartes empilées, Ampli + Looper) est fonctionnelle mais loin du mockup. Voir `docs/design-direction.md` pour la DA complète et le lien vers le mockup interactif. Probablement : navigation par pages (Ampli / Looper / Caméra / Export), polices personnalisées (actuellement police système par défaut), moniteur caméra flottant.
-3. **Export vidéo** (Jalon 5) — une fois la caméra en place, export MP4 via FFmpeg (encodeur matériel), formats vertical/horizontal, découpe.
-4. **Décider le format de projet** (dossier + JSON ?) — question ouverte depuis le début, jamais tranchée. L'export WAV de la boucle est un pis-aller, pas une vraie sauvegarde de projet.
-5. Revalider `Tools/nam_bench.cpp` sur le Mac — le CPU est différent, la taille de buffer optimale pourrait l'être aussi.
+Roadie est publié sous **[AGPLv3](LICENSE)**. Il s'appuie sur [JUCE](https://juce.com) (AGPLv3), [NeuralAmpModelerCore](https://github.com/sdatkinson/NeuralAmpModelerCore) (MIT), Eigen, nlohmann/json et yt-dlp : voir [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Les captures `.nam` et les IR ne sont pas fournies ; chacune appartient à son auteur.

@@ -1,0 +1,37 @@
+name: Bug
+description: Quelque chose ne marche pas comme prévu
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: Ce qui se passe
+      description: Ce que tu as fait, ce que tu attendais, ce qui est arrivé.
+    validations: { required: true }
+  - type: input
+    id: version
+    attributes:
+      label: Version de Roadie
+      placeholder: "0.3.0-beta.1"
+    validations: { required: true }
+  - type: input
+    id: mac
+    attributes:
+      label: Mac et macOS
+      placeholder: "MacBook Pro M2, macOS 15.5"
+    validations: { required: true }
+  - type: input
+    id: audio
+    attributes:
+      label: Interface audio et caméra
+      placeholder: "Scarlett Solo 4e gen, FaceTime HD"
+  - type: textarea
+    id: steps
+    attributes:
+      label: Pour reproduire
+      placeholder: "1. …\n2. …"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Journal ou capture d'écran
+      description: Rapport de plantage (Console.app › Rapports d'incident) ou capture. Retire tes chemins personnels.

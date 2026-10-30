@@ -1,592 +1,1156 @@
 #include "MainComponent.h"
 #include "Theme.h"
 
-#include <juce_audio_formats/juce_audio_formats.h>
+using namespace roadie;
+using Track = Session::Track;
 
-#include <iostream>
+namespace
+{
+constexpr int loopBarChoices[] = { 0, 1, 2, 4, 8, 16 };
+juce::String utf8 (const char* text) { return juce::String::fromUTF8 (text); }
+double nowSeconds() { return juce::Time::getMillisecondCounterHiRes() * 0.001; }
+constexpr int transitionMs = 200;
+const char* workspaceKey (MainComponent::Workspace w) { return w == MainComponent::Workspace::play ? "play" : "edit"; }
+} // namespace
 
+//==============================================================================
+// First launch: a bubble under the switch says what the two workspaces are.
+// A click on it (or the first switch) dismisses it for good.
+class MainComponent::Coachmark : public juce::Component
+{
+public:
+    std::function<void()> onDismiss;
+
+    void paint (juce::Graphics& g) override
+    {
+        using namespace theme;
+        auto bounds = getLocalBounds().toFloat().reduced (1.0f).withTrimmedTop (8.0f);
+        juce::Path bubble;
+        bubble.addPath (roadie::theme::squircle (bounds, radiusMd));
+        bubble.addTriangle (34.0f, 1.0f, 26.0f, bounds.getY() + 0.5f, 42.0f, bounds.getY() + 0.5f);
+        g.setColour (juce::Colours::black.withAlpha (0.3f));
+        g.fillPath (bubble, juce::AffineTransform::translation (0.0f, 3.0f));
+        g.setColour (surfaceRaised);
+        g.fillPath (bubble);
+        g.setColour (exportAccent.withAlpha (0.7f));
+        g.strokePath (bubble, juce::PathStrokeType (1.0f));
+
+        auto content = bounds.reduced (16.0f, 12.0f);
+        g.setColour (theme::text);
+        g.setFont (fonts::display (14.0f));
+        g.drawText ("Deux espaces de travail", content.removeFromTop (20.0f), juce::Justification::centredLeft, false);
+        content.removeFromTop (4.0f);
+        g.setColour (textMuted);
+        g.setFont (fonts::medium (12.5f));
+        g.drawFittedText (utf8 ("Jouer : la cam\xc3\xa9ra, la p\xc3\xa9" "dale et la balance, pour enregistrer.\n"
+                                "Monter : la timeline en grand pour \xc3\xa9" "diter, cam\xc3\xa9ra coup\xc3\xa9" "e.\n"
+                                "\xe2\x8c\x98" "1 / \xe2\x8c\x98" "2 pour passer de l'un \xc3\xa0 l'autre."),
+                          content.removeFromTop (72.0f).toNearestInt(), juce::Justification::topLeft, 4, 1.0f);
+        g.setColour (ink (exportAccent));
+        g.setFont (fonts::semibold (12.0f));
+        g.drawText ("Compris", content, juce::Justification::bottomRight, false);
+    }
+
+    void mouseUp (const juce::MouseEvent&) override
+    {
+        if (onDismiss)
+            onDismiss();
+    }
+};
+
+//==============================================================================
 MainComponent::MainComponent()
 {
+    auto& settings = session.getSettings();
+    // Before the first paint: system (default), or the mode saved by the user.
+    {
+        const auto mode = getAppearanceMode();
+        const bool light = mode == AppearanceMode::light
+                           || (mode == AppearanceMode::system && ! juce::Desktop::getInstance().isDarkModeActive());
+        theme::setAppearance (light ? theme::Appearance::light : theme::Appearance::dark);
+        lookAndFeel.applyTheme();
+    }
+    juce::Desktop::getInstance().addDarkModeSettingListener (this);
+
+    // Before anything is sized: the window opens at the chosen scale.
+    juce::Desktop::getInstance().setGlobalScaleFactor ((float) settings.getDoubleValue ("uiScale", getDefaultUiScale()));
+
     setLookAndFeel (&lookAndFeel);
+    juce::LookAndFeel::setDefaultLookAndFeel (&lookAndFeel);
 
-    brandLabel.setText ("Roadie", juce::dontSendNotification);
-    brandLabel.setFont (juce::Font (18.0f, juce::Font::bold));
-    addAndMakeVisible (brandLabel);
-
-    cpuPill.setText ("-- % CPU");
-    latencyPill.setText ("-- ms");
-    addAndMakeVisible (cpuPill);
-    addAndMakeVisible (latencyPill);
-
-    settingsButton.onClick = [this] { openAudioSettings(); };
-    settingsButton.setTooltip (juce::CharPointer_UTF8 ("Choisir la carte son et la taille de buffer"));
-    addAndMakeVisible (settingsButton);
-
-    ampTitle.setText ("Ampli", juce::dontSendNotification);
-    ampTitle.setFont (juce::Font (16.0f, juce::Font::bold));
-    addAndMakeVisible (ampTitle);
-
-    ampSubtitle.setText (juce::CharPointer_UTF8 ("Aucune capture charg\xc3\xa9" "e \xe2\x80\x94 signal brut"),
-                          juce::dontSendNotification);
-    ampSubtitle.setFont (13.0f);
-    ampSubtitle.setColour (juce::Label::textColourId, roadie::theme::textMuted);
-    addAndMakeVisible (ampSubtitle);
-
-    loadNamButton.onClick = [this] { openNamFileChooser(); };
-    loadNamButton.setTooltip (juce::CharPointer_UTF8 ("Charger une capture d'ampli (.nam)"));
-    addAndMakeVisible (loadNamButton);
-
-    cabLabel.setText (juce::CharPointer_UTF8 ("Pas de cabinet (IR) \xe2\x80\x94 sortie directe"),
-                       juce::dontSendNotification);
-    cabLabel.setFont (13.0f);
-    cabLabel.setColour (juce::Label::textColourId, roadie::theme::textMuted);
-    addAndMakeVisible (cabLabel);
-
-    loadIrButton.onClick = [this] { openIrFileChooser(); };
-    loadIrButton.setTooltip (juce::CharPointer_UTF8 ("Charger une r\xc3\xa9ponse impulsionnelle de cabinet (.wav)"));
-    addAndMakeVisible (loadIrButton);
-
-    for (auto* knob : { &inputGainKnob, &outputVolumeKnob })
+    topBar.onOpenSettings = [this] { openAudioSettings(); };
+    topBar.onOpenExport = [this] { openExportSheet(); };
+    topBar.onToggleLibrary = [this] { setLibraryShown (! isLibraryShown()); };
+    topBar.onToggleInspector = [this] { setInspectorShown (! isInspectorShown()); };
+    topBar.onRecord = [this] { recordTake(); };
+    topBar.onWorkspaceChanged = [this] (int index) { setWorkspace (index == 0 ? Workspace::play : Workspace::edit); };
+    addAndMakeVisible (topBar);
+    library.onImportSong = [this] { chooseSong(); };
+    library.onImportYouTube = [this] { chooseYouTubeSong(); };
+    library.onShowClip = [this] (int clipIndex)
     {
-        knob->setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-        knob->setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
-        knob->setRange (-24.0, 24.0, 0.1);
-        knob->setValue (0.0, juce::dontSendNotification);
-        knob->setDoubleClickReturnValue (true, 0.0);
-        addAndMakeVisible (knob);
-    }
-    inputGainKnob.setTooltip (juce::CharPointer_UTF8 ("Gain avant l'ampli, en dB (double-clic pour revenir \xc3\xa0 0)"));
-    outputVolumeKnob.setTooltip (juce::CharPointer_UTF8 ("Volume de sortie, en dB (double-clic pour revenir \xc3\xa0 0)"));
-
-    inputGainTitle.setText (juce::CharPointer_UTF8 ("Gain d'entr\xc3\xa9" "e"), juce::dontSendNotification);
-    outputVolumeTitle.setText ("Volume", juce::dontSendNotification);
-    for (auto* l : { &inputGainTitle, &outputVolumeTitle })
-    {
-        l->setJustificationType (juce::Justification::centred);
-        l->setFont (12.0f);
-        l->setColour (juce::Label::textColourId, roadie::theme::textMuted);
-        addAndMakeVisible (l);
-    }
-
-    for (auto* l : { &inputGainValue, &outputVolumeValue })
-    {
-        l->setJustificationType (juce::Justification::centred);
-        l->setFont (12.0f);
-        l->setColour (juce::Label::textColourId, roadie::theme::textFaint);
-        addAndMakeVisible (l);
-    }
-    inputGainValue.setText ("0.0 dB", juce::dontSendNotification);
-    outputVolumeValue.setText ("0.0 dB", juce::dontSendNotification);
-
-    inputGainKnob.onValueChange = [this]
-    {
-        ampEngine.setInputGainDb ((float) inputGainKnob.getValue());
-        updateKnobLabel (inputGainValue, inputGainKnob.getValue());
+        const auto& clips = session.getArrangement().clips;
+        if (! juce::isPositiveAndBelow (clipIndex, (int) clips.size()))
+            return;
+        session.selectClip (clipIndex);
+        session.locate (clips[(size_t) clipIndex].start);
+        selectTrack (Track::amp);
     };
-    outputVolumeKnob.onValueChange = [this]
+    addAndMakeVisible (library);
+
+    timeline.onTrackSelected = [this] (Track t) { selectTrack (t); };
+    timeline.onCameraClicked = [this]
     {
-        ampEngine.setOutputVolumeDb ((float) outputVolumeKnob.getValue());
-        updateKnobLabel (outputVolumeValue, outputVolumeKnob.getValue());
+        selectTrack (Track::camera);
+        if (workspace == Workspace::play && CameraCapture::isSupported() && ! session.getCamera().isOpen() && ! session.isCameraOpening())
+            session.openCamera (session.getSettings().getValue ("cameraDevice"));
     };
-
-    meterLabel.setText (juce::CharPointer_UTF8 ("Niveau d'entr\xc3\xa9" "e"), juce::dontSendNotification);
-    meterLabel.setFont (11.0f);
-    meterLabel.setColour (juce::Label::textColourId, roadie::theme::textFaint);
-    addAndMakeVisible (meterLabel);
-    addAndMakeVisible (levelMeter);
-
-    looperTitle.setText ("Looper", juce::dontSendNotification);
-    looperTitle.setFont (juce::Font (16.0f, juce::Font::bold));
-    addAndMakeVisible (looperTitle);
-
-    looperStatusLabel.setText ("Vide", juce::dontSendNotification);
-    looperStatusLabel.setFont (13.0f);
-    looperStatusLabel.setColour (juce::Label::textColourId, roadie::theme::textMuted);
-    looperStatusLabel.setJustificationType (juce::Justification::centredRight);
-    addAndMakeVisible (looperStatusLabel);
-
-    exportLoopButton.onClick = [this] { exportLoopToWav(); };
-    exportLoopButton.setTooltip (juce::CharPointer_UTF8 ("Exporter la boucle actuelle en fichier .wav"));
-    addAndMakeVisible (exportLoopButton);
-
-    recordButton.onClick = [this] { looper.requestRecord(); };
-    recordButton.setTooltip (juce::CharPointer_UTF8 ("D\xc3\xa9" "marrer / arr\xc3\xaa"
-                                                        "ter l'enregistrement de la boucle (R)"));
-    overdubButton.onClick = [this] { looper.requestOverdub(); };
-    overdubButton.setTooltip (juce::CharPointer_UTF8 ("Ajouter une couche par-dessus la boucle existante (O)"));
-    playStopButton.onClick = [this] { looper.requestPlayStop(); };
-    playStopButton.setTooltip (juce::CharPointer_UTF8 ("Mettre la boucle en lecture ou en pause (Espace)"));
-    undoButton.onClick = [this] { looper.requestUndo(); };
-    undoButton.setTooltip (juce::CharPointer_UTF8 ("Annuler le dernier overdub (U) \xe2\x80\x94 un seul niveau"));
-    clearButton.onClick = [this] { looper.requestClear(); };
-    clearButton.setTooltip (juce::CharPointer_UTF8 ("Effacer la boucle et repartir de z\xc3\xa9ro (Maj+Retour arri\xc3\xa8re)"));
-    for (auto* b : { &recordButton, &overdubButton, &playStopButton, &undoButton, &clearButton })
-        addAndMakeVisible (b);
-
-    bpmSlider.setSliderStyle (juce::Slider::LinearHorizontal);
-    bpmSlider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
-    bpmSlider.setRange (40.0, 220.0, 1.0);
-    bpmSlider.setValue (100.0, juce::dontSendNotification);
-    bpmSlider.setDoubleClickReturnValue (true, 100.0);
-    bpmSlider.setTooltip (juce::CharPointer_UTF8 ("Tempo du m\xc3\xa9tronome (double-clic pour revenir \xc3\xa0 100)"));
-    bpmSlider.onValueChange = [this]
+    timeline.onExportRequested = [this] { openExportSheet(); };
+    timeline.onImportSong = [this] { chooseSong(); };
+    timeline.onImportYouTube = [this] { chooseYouTubeSong(); };
+    timeline.onTrackHeightsChanged = [this]
     {
-        metronome.setBpm (bpmSlider.getValue());
-        bpmValueLabel.setText (juce::String ((int) bpmSlider.getValue()) + " BPM", juce::dontSendNotification);
+        session.getSettings().setValue (juce::String ("layout.") + workspaceKey (workspace) + ".trackHeights", timeline.getTrackHeightsState());
     };
-    addAndMakeVisible (bpmSlider);
+    inspector.onImportSong = [this] { chooseSong(); };
+    inspector.onImportYouTube = [this] { chooseYouTubeSong(); };
+    timeline.setHeaderWidth (settings.getIntValue ("trackHeaderWidth", Timeline::defaultHeaderWidth));
+    timeline.onHeaderWidthChanged = [this] (int width) { session.getSettings().setValue ("trackHeaderWidth", width); };
+    addAndMakeVisible (timeline);
 
-    bpmValueLabel.setText ("100 BPM", juce::dontSendNotification);
-    bpmValueLabel.setFont (12.0f);
-    bpmValueLabel.setJustificationType (juce::Justification::centredLeft);
-    bpmValueLabel.setColour (juce::Label::textColourId, roadie::theme::textMuted);
-    addAndMakeVisible (bpmValueLabel);
+    monitor.onCameraClicked = [this] { timeline.onCameraClicked(); };
+    monitor.onDoubleClicked = [this] { toggleMaximisedPanel (&monitor); };
+    addAndMakeVisible (monitor);
 
-    metronomeToggle.onClick = [this] { metronome.setEnabled (metronomeToggle.getToggleState()); };
-    metronomeToggle.setTooltip (juce::CharPointer_UTF8 ("Clic audible, jamais enregistr\xc3\xa9 dans la boucle"));
-    addAndMakeVisible (metronomeToggle);
+    stage.onBalanceHeightChanged = [this] (int height)
+    {
+        playLayout.balanceHeight = height;
+        saveLayout (Workspace::play);
+    };
+    addAndMakeVisible (stage);
+    addAndMakeVisible (inspector);
 
-    addAndMakeVisible (loopProgress);
-    updateLooperStatus(); // correct enabled/disabled state from the first frame, don't wait for the timer
+    // Dividers: added after the panels (over their borders) and before the
+    // export sheet.
+    setUpDivider (librarySplitter, Divider::library);
+    setUpDivider (sideSplitter, Divider::side);
+    setUpDivider (inspectorSplitter, Divider::inspector);
+    setUpDivider (stripSplitter, Divider::strip);
+
+    exportSheet.onClose = [this] { grabKeyboardFocus(); };
+    addChildComponent (exportSheet);
+
+    loadLayouts();
+    workspace = settings.getIntValue ("workspace", 0) == 1 ? Workspace::edit : Workspace::play;
+    topBar.setWorkspace (workspace == Workspace::play ? 0 : 1);
+    monitor.setPlaybackOnly (workspace == Workspace::edit);
+    stage.setBalanceHeight (playLayout.balanceHeight);
+    timeline.setTrackHeightsState (settings.getValue (juce::String ("layout.") + workspaceKey (workspace) + ".trackHeights"));
+
+    if (! settings.getBoolValue ("hintWorkspacesSeen", false))
+    {
+        coachmark = std::make_unique<Coachmark>();
+        coachmark->onDismiss = [this]
+        {
+            session.getSettings().setValue ("hintWorkspacesSeen", true);
+            juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (this)]
+            {
+                if (safe != nullptr)
+                    safe->coachmark.reset();
+            });
+        };
+        addAndMakeVisible (*coachmark);
+    }
+
+    selectTrack (Track::amp);
+    session.addChangeListener (this);
+
+   #if JUCE_MAC
+    juce::MenuBarModel::setMacMainMenu (this);
+   #endif
 
     setWantsKeyboardFocus (true);
 
-    setAudioChannels (1, 2);
+    // As large as the screen comfortably allows (in the scaled coordinates,
+    // so a smaller interface opens a window that shows more).
+    auto screen = juce::Rectangle<int> (0, 0, 1280, 800);
+    if (auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
+        screen = display->userBounds.toNearestInt();
+    setSize (juce::jlimit (980, 1440, screen.getWidth() * 92 / 100), juce::jlimit (600, 900, screen.getHeight() * 90 / 100));
 
-    // The NAM model itself costs single-digit % CPU even at tiny buffers
-    // (benchmarked separately), so the default negotiated buffer size is the
-    // real latency driver. Ask for something small; the backend will clamp
-    // to its nearest supported value if 128 isn't exactly available.
-    {
-        auto setup = deviceManager.getAudioDeviceSetup();
-        setup.bufferSize = 64;
-        deviceManager.setAudioDeviceSetup (setup, true);
-    }
-
-    setSize (520, 612);
-    startTimerHz (15);
-    grabKeyboardFocus();
+    startTimerHz (30);
+    updateTitle();
 }
 
 MainComponent::~MainComponent()
 {
+    juce::Desktop::getInstance().removeDarkModeSettingListener (this);
     stopTimer();
+    animator.cancelAllAnimations (false);
+    session.removeChangeListener (this);
+   #if JUCE_MAC
+    juce::MenuBarModel::setMacMainMenu (nullptr);
+   #endif
+    juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
     setLookAndFeel (nullptr);
-    shutdownAudio();
 }
 
-void MainComponent::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
+//==============================================================================
+void MainComponent::timerCallback()
 {
-    ampEngine.prepare (sampleRate, samplesPerBlockExpected);
-    looper.prepare (sampleRate);
-    metronome.prepare (sampleRate);
+    // Keep the shortcuts alive: give focus back to the window once nothing
+    // else (a text field, the export sheet) is holding it.
+    if (isShowing() && juce::Component::getCurrentlyFocusedComponent() == nullptr)
+        grabKeyboardFocus();
 
-    if (auto* device = deviceManager.getCurrentAudioDevice())
+    updateCamera();
+
+    topBar.refresh();
+    timeline.refresh();
+    monitor.setCountIn (session.getCountInBeatsLeft());
+    monitor.refresh();
+    if (stage.isVisible())
+        stage.refresh();
+    inspector.refresh();
+    if (exportSheet.isVisible())
+        exportSheet.refresh();
+
+    if (session.getNotice() != shownNotice)
     {
-        auto roundTripMs = ((double) samplesPerBlockExpected + device->getInputLatencyInSamples()
-                             + device->getOutputLatencyInSamples())
-                          / sampleRate * 1000.0;
-        std::cerr << "[Roadie] device=" << device->getName()
-                   << " sampleRate=" << sampleRate
-                   << " bufferSize=" << samplesPerBlockExpected
-                   << " inputLatencySamples=" << device->getInputLatencyInSamples()
-                   << " outputLatencySamples=" << device->getOutputLatencyInSamples()
-                   << " estRoundTripMs=" << roundTripMs
-                   << std::endl;
+        repaint (toastArea.expanded (40, 20));
+        shownNotice = session.getNotice();
+        repaint (toastArea.expanded (40, 20));
     }
 }
 
-void MainComponent::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill)
+void MainComponent::updateCamera()
 {
-    auto* buffer = bufferToFill.buffer;
-    auto numChannels = buffer->getNumChannels();
-    if (numChannels < 1)
+    // Monter has no use for the live picture: the camera is switched off
+    // (light off, CPU saved) — once a take in progress has been finalised —
+    // and comes back with Jouer.
+    if (workspace == Workspace::edit)
+    {
+        if (session.getCamera().isOpen() && ! session.isRecordingTake() && ! session.isFinishingTake())
+            session.suspendCamera();
+    }
+    else if (session.isCameraSuspended())
+    {
+        session.resumeCamera();
+    }
+
+    // ● pressed in Monter: record once the camera is back (or gave up).
+    if (pendingRecord && workspace == Workspace::play)
+    {
+        const bool cameraReady = session.getCamera().isOpen() || (! session.isCameraOpening() && ! session.isCameraSuspended());
+        if (cameraReady || nowSeconds() - pendingRecordSince > 4.0)
+        {
+            pendingRecord = false;
+            if (! session.isRecordingTake())
+                session.toggleTakeRecording();
+        }
+    }
+}
+
+void MainComponent::recordTake()
+{
+    if (session.isRecordingTake() || session.isFinishingTake())
+    {
+        pendingRecord = false;
+        session.toggleTakeRecording();
+        return;
+    }
+
+    if (workspace == Workspace::edit)
+    {
+        setWorkspace (Workspace::play);
+        pendingRecord = true;
+        pendingRecordSince = nowSeconds();
+        session.notify (utf8 ("Retour dans Jouer : la prise d\xc3\xa9marre d\xc3\xa8s que la cam\xc3\xa9ra est pr\xc3\xaa" "te."));
+        return;
+    }
+
+    session.toggleTakeRecording();
+}
+
+void MainComponent::changeListenerCallback (juce::ChangeBroadcaster*)
+{
+    library.refresh();
+    updateTitle();
+    menuItemsChanged();
+}
+
+void MainComponent::updateTitle()
+{
+    const auto title = session.getProjectName() + utf8 (" \xe2\x80\x94 Roadie");
+    if (title != shownTitle)
+    {
+        shownTitle = title;
+        if (onTitleChanged)
+            onTitleChanged (title);
+    }
+}
+
+MainComponent::AppearanceMode MainComponent::getAppearanceMode() const
+{
+    const auto saved = const_cast<Session&> (session).getSettings().getValue ("appearance");
+    if (saved == "light") return AppearanceMode::light;
+    if (saved == "dark") return AppearanceMode::dark;
+    return AppearanceMode::system;
+}
+
+void MainComponent::setAppearanceMode (AppearanceMode mode)
+{
+    session.getSettings().setValue ("appearance", mode == AppearanceMode::light ? "light"
+                                                  : mode == AppearanceMode::dark ? "dark" : "system");
+    applyAppearance();
+}
+
+void MainComponent::applyAppearance()
+{
+    const auto mode = getAppearanceMode();
+    const bool light = mode == AppearanceMode::light
+                       || (mode == AppearanceMode::system && ! juce::Desktop::getInstance().isDarkModeActive());
+    theme::setAppearance (light ? theme::Appearance::light : theme::Appearance::dark);
+    lookAndFeel.applyTheme();
+    sendLookAndFeelChange();
+    repaint();
+    menuItemsChanged();
+}
+
+void MainComponent::darkModeSettingChanged()
+{
+    if (getAppearanceMode() == AppearanceMode::system)
+        applyAppearance();
+}
+
+void MainComponent::setLightAppearance (bool shouldBeLight)
+{
+    setAppearanceMode (shouldBeLight ? AppearanceMode::light : AppearanceMode::dark);
+}
+
+//==============================================================================
+void MainComponent::setWorkspace (Workspace newWorkspace, bool animate)
+{
+    if (coachmark != nullptr && newWorkspace != workspace)
+        coachmark->onDismiss();
+
+    if (newWorkspace == workspace)
         return;
 
-    // AudioAppComponent already copies the live input into channel 0 before this
-    // call. Run it through the amp model, then mirror the result to the other
-    // output channels so a mono guitar monitors in stereo.
-    auto* channelData = buffer->getWritePointer (0, bufferToFill.startSample);
-    ampEngine.process (channelData, bufferToFill.numSamples);
-    looper.process (channelData, bufferToFill.numSamples);
-    metronome.process (channelData, bufferToFill.numSamples);
-
-    for (int channel = 1; channel < numChannels; ++channel)
-        buffer->copyFrom (channel, bufferToFill.startSample,
-                           *buffer, 0, bufferToFill.startSample,
-                           bufferToFill.numSamples);
+    workspace = newWorkspace;
+    maximised = nullptr;
+    session.getSettings().setValue ("workspace", workspace == Workspace::play ? 0 : 1);
+    topBar.setWorkspace (workspace == Workspace::play ? 0 : 1);
+    monitor.setPlaybackOnly (workspace == Workspace::edit);
+    if (workspace == Workspace::edit)
+        pendingRecord = false;
+    // Each workspace has its own track heights (thin strip / roomy lanes).
+    timeline.setTrackHeightsState (session.getSettings().getValue (juce::String ("layout.") + workspaceKey (workspace) + ".trackHeights",
+                                                                   workspace == Workspace::play ? "92,92,40,92" : "92,92,52,92"));
+    updateCamera();
+    applyLayout (animate);
+    menuItemsChanged();
 }
 
-void MainComponent::releaseResources()
+MainComponent::Pane& MainComponent::paneFor (Divider divider)
 {
+    auto& l = layout();
+    switch (divider)
+    {
+        case Divider::library:   return l.library;
+        case Divider::inspector: return l.inspector;
+        case Divider::side:      return l.side;
+        case Divider::strip:
+        default:                 return l.strip;
+    }
 }
 
+void MainComponent::loadLayouts()
+{
+    // Monter starts with a wider right-hand column (monitor + inspector) and
+    // a taller inspector inside it.
+    editLayout.side = { "side", 380, 380, 280, 640 };
+    editLayout.inspector = { "inspector", 320, 320, 160, 900 };
+
+    auto& settings = session.getSettings();
+    for (auto w : { Workspace::play, Workspace::edit })
+    {
+        auto& l = w == Workspace::play ? playLayout : editLayout;
+        for (auto* pane : { &l.library, &l.inspector, &l.side, &l.strip })
+        {
+            const auto prefix = juce::String ("layout.") + workspaceKey (w) + "." + pane->key;
+            pane->size = juce::jlimit (pane->minSize, pane->maxSize, settings.getIntValue (prefix + ".size", pane->defaultSize));
+            pane->collapsed = settings.getBoolValue (prefix + ".collapsed", false);
+        }
+        if (w == Workspace::play)
+            l.balanceHeight = settings.getIntValue ("layout.play.balance", StagePanel::defaultBalanceHeight);
+    }
+}
+
+void MainComponent::saveLayout (Workspace w)
+{
+    auto& settings = session.getSettings();
+    auto& l = w == Workspace::play ? playLayout : editLayout;
+    for (auto* pane : { &l.library, &l.inspector, &l.side, &l.strip })
+    {
+        const auto prefix = juce::String ("layout.") + workspaceKey (w) + "." + pane->key;
+        settings.setValue (prefix + ".size", pane->size);
+        settings.setValue (prefix + ".collapsed", pane->collapsed);
+    }
+    if (w == Workspace::play)
+        settings.setValue ("layout.play.balance", l.balanceHeight);
+}
+
+void MainComponent::resetLayout()
+{
+    auto& l = layout();
+    for (auto* pane : { &l.library, &l.inspector, &l.side, &l.strip })
+    {
+        pane->size = pane->defaultSize;
+        pane->collapsed = false;
+    }
+    l.balanceHeight = StagePanel::defaultBalanceHeight;
+    if (workspace == Workspace::play)
+        stage.setBalanceHeight (l.balanceHeight);
+    maximised = nullptr;
+    saveLayout (workspace);
+    applyLayout (true);
+    menuItemsChanged();
+}
+
+void MainComponent::setUpDivider (ui::Splitter& splitter, Divider divider)
+{
+    // The library grows to the right; the others grow away from the drag
+    // direction (the side column to the left, the bottom panels upwards).
+    const int sign = divider == Divider::library ? 1 : -1;
+
+    splitter.onDragStart = [this, divider]
+    {
+        auto& pane = paneFor (divider);
+        sizeAtDragStart = pane.collapsed ? 0 : pane.size;
+        maximised = nullptr;
+    };
+    splitter.onDrag = [this, divider, sign] (int delta)
+    {
+        auto& pane = paneFor (divider);
+        const int wanted = sizeAtDragStart + sign * delta;
+        // Pulled below half its minimum: the panel folds away (its size is
+        // kept for when it comes back).
+        pane.collapsed = wanted < pane.minSize / 2;
+        if (! pane.collapsed)
+            pane.size = juce::jlimit (pane.minSize, pane.maxSize, wanted);
+        applyLayout (false);
+    };
+    splitter.onDragEnd = [this]
+    {
+        saveLayout (workspace);
+        topBar.setPanelsShown (isLibraryShown(), isInspectorShown());
+        menuItemsChanged();
+    };
+    splitter.onDoubleClick = [this, divider]
+    {
+        auto& pane = paneFor (divider);
+        pane.size = pane.defaultSize;
+        pane.collapsed = false;
+        saveLayout (workspace);
+        applyLayout (false);
+        topBar.setPanelsShown (isLibraryShown(), isInspectorShown());
+    };
+    addAndMakeVisible (splitter);
+}
+
+bool MainComponent::isLibraryShown() const noexcept { return ! layout().library.collapsed; }
+bool MainComponent::isInspectorShown() const noexcept { return ! layout().inspector.collapsed; }
+
+void MainComponent::setLibraryShown (bool shouldBeShown, bool remember)
+{
+    layout().library.collapsed = ! shouldBeShown;
+    if (remember)
+        saveLayout (workspace);
+    applyLayout (false);
+    menuItemsChanged();
+}
+
+void MainComponent::setInspectorShown (bool shouldBeShown, bool remember)
+{
+    layout().inspector.collapsed = ! shouldBeShown;
+    if (remember)
+        saveLayout (workspace);
+    applyLayout (false);
+    menuItemsChanged();
+}
+
+juce::Component* MainComponent::panelUnderMouse() const
+{
+    const auto mouse = getMouseXYRelative();
+    for (auto* panel : std::initializer_list<const juce::Component*> { &monitor, &timeline, &library, &inspector, &stage })
+        if (panel->isVisible() && panel->getBounds().contains (mouse))
+            return const_cast<juce::Component*> (panel);
+    return nullptr;
+}
+
+void MainComponent::toggleMaximisedPanel (juce::Component* panel)
+{
+    maximised = (panel == nullptr || panel == maximised) ? nullptr : panel;
+    applyLayout (true);
+    menuItemsChanged();
+}
+
+void MainComponent::applyLayout (bool animate)
+{
+    if (getWidth() <= 0)
+        return;
+
+    animator.cancelAllAnimations (true);
+
+    auto area = getLocalBounds();
+    topBar.setBounds (area.removeFromTop (TopBar::preferredHeight));
+    exportSheet.setBounds (getLocalBounds());
+
+    // Target bounds of each panel (empty: hidden).
+    juce::Rectangle<int> libraryArea, monitorArea, timelineArea, stageArea, inspectorArea;
+    auto& l = layout();
+    const bool play = workspace == Workspace::play;
+    const int t = ui::Splitter::thickness;
+
+    struct DividerPlacement
+    {
+        bool visible = false, collapsed = false;
+        juce::Rectangle<int> bounds;
+    };
+    DividerPlacement libraryDivider, sideDivider, inspectorDivider, stripDivider;
+
+    if (maximised != nullptr)
+    {
+        // One panel takes everything below the top bar.
+        if (maximised == &library) libraryArea = area;
+        else if (maximised == &monitor) monitorArea = area;
+        else if (maximised == &timeline) timelineArea = area;
+        else if (maximised == &stage) stageArea = area;
+        else if (maximised == &inspector) inspectorArea = area;
+    }
+    else
+    {
+        // Each panel gets its size, but never squeezes the centre (monitor
+        // or timeline) below a usable minimum.
+        const int minCentreWidth = 360, minCentreHeight = 160;
+        auto fit = [] (const Pane& pane, int available) { return pane.collapsed ? 0 : juce::jlimit (0, std::max (0, available), pane.size); };
+
+        // Jouer: the inspector spans the whole width at the bottom.
+        if (play)
+        {
+            const int h = fit (l.inspector, area.getHeight() - minCentreHeight - 60);
+            inspectorArea = area.removeFromBottom (h);
+            inspectorDivider = { true, l.inspector.collapsed, { 0, area.getBottom() - t / 2, getWidth(), t } };
+        }
+
+        const int libraryWidth = fit (l.library, area.getWidth() - minCentreWidth - (l.side.collapsed ? 0 : l.side.minSize));
+        libraryArea = area.removeFromLeft (libraryWidth);
+        libraryDivider = { true, l.library.collapsed, { area.getX() - (libraryWidth > 0 ? t / 2 : 0), area.getY(), t, area.getHeight() } };
+
+        const int sideWidth = fit (l.side, area.getWidth() - minCentreWidth);
+        auto side = area.removeFromRight (sideWidth);
+        sideDivider = { true, l.side.collapsed, { area.getRight() - (sideWidth > 0 ? t / 2 : t), area.getY(), t, area.getHeight() } };
+
+        if (play)
+        {
+            stageArea = side;
+            const int stripHeight = fit (l.strip, area.getHeight() - minCentreHeight);
+            timelineArea = area.removeFromBottom (stripHeight);
+            // Inset by a divider's width at both ends: the corners belong to
+            // the vertical dividers.
+            stripDivider = { true, l.strip.collapsed, { area.getX() + t, area.getBottom() - (stripHeight > 0 ? t / 2 : t), area.getWidth() - 2 * t, t } };
+            monitorArea = area;
+        }
+        else
+        {
+            timelineArea = area;
+            if (! side.isEmpty())
+            {
+                const int h = fit (l.inspector, side.getHeight() - 120);
+                inspectorArea = side.removeFromBottom (h);
+                inspectorDivider = { true, l.inspector.collapsed,
+                                     { side.getX() + t, side.getBottom() - (h > 0 ? t / 2 : t), side.getWidth() - t, t } };
+                monitorArea = side;
+            }
+        }
+    }
+
+    const std::pair<juce::Component*, juce::Rectangle<int>> targets[] = {
+        { &library, libraryArea }, { &monitor, monitorArea }, { &timeline, timelineArea },
+        { &stage, stageArea }, { &inspector, inspectorArea },
+    };
+
+    for (const auto& [component, target] : targets)
+    {
+        const bool show = ! target.isEmpty();
+        if (! animate || ! isShowing())
+        {
+            component->setVisible (show);
+            component->setAlpha (1.0f);
+            if (show)
+                component->setBounds (target);
+            continue;
+        }
+
+        if (show && component->isVisible())
+        {
+            // Moves to its new place: the eye can follow it.
+            animator.animateComponent (component, target, 1.0f, transitionMs, false, 0.6, 0.2);
+        }
+        else if (show)
+        {
+            component->setBounds (target);
+            component->setAlpha (0.0f);
+            component->setVisible (true);
+            animator.animateComponent (component, target, 1.0f, transitionMs, false, 0.6, 0.2);
+        }
+        else if (component->isVisible())
+        {
+            animator.fadeOut (component, transitionMs / 2);
+            component->setVisible (false);
+        }
+    }
+
+    const std::pair<ui::Splitter*, DividerPlacement*> dividers[] = {
+        { &librarySplitter, &libraryDivider }, { &sideSplitter, &sideDivider },
+        { &inspectorSplitter, &inspectorDivider }, { &stripSplitter, &stripDivider },
+    };
+    for (const auto& [splitter, placement] : dividers)
+    {
+        splitter->setVisible (placement->visible);
+        splitter->setCollapsed (placement->collapsed);
+        splitter->setBounds (placement->bounds);
+        splitter->toFront (false);
+    }
+
+    exportSheet.toFront (false);
+    if (coachmark != nullptr)
+    {
+        const auto anchor = getWorkspaceSwitchBounds();
+        coachmark->setBounds (anchor.getX() - 8, anchor.getBottom() + 4, 400, 150);
+        coachmark->toFront (false);
+    }
+
+    topBar.setPanelsShown (isLibraryShown(), isInspectorShown());
+    toastArea = juce::Rectangle<int> (10, 34).withCentre ({ getWidth() / 2, getHeight() - 30 });
+    repaint();
+}
+
+float MainComponent::getDefaultUiScale()
+{
+    // logicalBounds is divided by the current scale: undo it to get points.
+    if (auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
+        return display->logicalBounds.getWidth() * juce::Desktop::getInstance().getGlobalScaleFactor() <= 1440.0f ? 0.9f : 1.0f;
+    return 1.0f;
+}
+
+void MainComponent::setUiScale (float scale)
+{
+    // The window keeps its size on screen; its content gets more (or fewer)
+    // logical pixels, so a smaller interface shows more of the timeline.
+    juce::Desktop::getInstance().setGlobalScaleFactor (scale);
+    session.getSettings().setValue ("uiScale", (double) scale);
+    menuItemsChanged();
+}
+
+// Asks for a YouTube link (the clipboard's one is offered), then downloads
+// the audio and imports it as the backing track.
+void MainComponent::chooseYouTubeSong()
+{
+    auto* window = new juce::AlertWindow (utf8 ("Morceau depuis YouTube"),
+                                          utf8 ("Colle le lien de la vid\xc3\xa9o : l'audio est t\xc3\xa9l\xc3\xa9" "charg\xc3\xa9, puis le tempo et les parties sont d\xc3\xa9tect\xc3\xa9s tout seuls."),
+                                          juce::MessageBoxIconType::NoIcon, this);
+    const auto clipboard = juce::SystemClipboard::getTextFromClipboard().trim();
+    window->addTextEditor ("url", Session::isYouTubeUrl (clipboard) ? clipboard : juce::String(), "Lien YouTube");
+    window->addButton (utf8 ("T\xc3\xa9l\xc3\xa9" "charger"), 1, juce::KeyPress (juce::KeyPress::returnKey));
+    window->addButton ("Annuler", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    window->enterModalState (true, juce::ModalCallbackFunction::create ([this, window] (int result)
+    {
+        if (result == 1)
+            session.importSongFromUrl (window->getTextEditorContents ("url"));
+    }), true);
+}
+
+void MainComponent::selectTrackByName (const juce::String& name)
+{
+    if (name == "loop")
+        selectTrack (Track::loop);
+    else if (name == "song")
+        selectTrack (Track::song);
+    else if (name == "camera")
+        selectTrack (Track::camera);
+    else
+        selectTrack (Track::amp);
+}
+
+void MainComponent::selectTrack (Track track)
+{
+    if (track == Track::loop && ! session.isLooperTrackVisible())
+        session.setLooperTrackVisible (true); // 2 on a project without a Looper adds one
+    timeline.setSelectedTrack (track);
+    inspector.show (track);
+}
+
+//==============================================================================
+void MainComponent::paint (juce::Graphics& g)
+{
+    g.fillAll (theme::background);
+}
+
+void MainComponent::paintOverChildren (juce::Graphics& g)
+{
+    using namespace theme;
+
+    if (dropHighlight)
+    {
+        g.setColour (exportAccent.withAlpha (0.08f));
+        g.fillRect (getLocalBounds());
+        g.setColour (exportAccent);
+        g.drawRect (getLocalBounds(), 2);
+    }
+
+    // Toast: short confirmations ("Prise 3 enregistrée…") near the bottom.
+    if (shownNotice.isEmpty())
+        return;
+
+    const auto font = fonts::semibold (13.0f);
+    const int width = std::min (getWidth() - 40, (int) std::ceil (juce::GlyphArrangement::getStringWidth (font, shownNotice)) + 48);
+    const auto anchor = timeline.isVisible() ? timeline.getBounds() : getLocalBounds();
+    toastArea = juce::Rectangle<int> (width, 34).withCentre ({ anchor.getCentreX(), anchor.getBottom() - 30 });
+
+    g.setColour (surfaceRaised.withAlpha (0.97f));
+    roadie::theme::fillSquircle (g, toastArea.toFloat(), 17.0f);
+    g.setColour (border);
+    roadie::theme::drawSquircle (g, toastArea.toFloat().reduced (0.5f), 17.0f, 1.0f);
+    g.setColour (text);
+    g.setFont (font);
+    g.drawText (shownNotice, toastArea.reduced (18, 0), juce::Justification::centred, true);
+}
+
+void MainComponent::resized()
+{
+    applyLayout (false);
+}
+
+//==============================================================================
 bool MainComponent::keyPressed (const juce::KeyPress& key)
 {
-    // Looper shortcuts so the player doesn't need the mouse mid-performance.
-    if (key == juce::KeyPress::spaceKey)
+    const auto mods = key.getModifiers();
+    const auto code = key.getKeyCode();
+    const auto c = juce::CharacterFunctions::toLowerCase (key.getTextCharacter());
+
+    if (mods.isCommandDown())
     {
-        looper.requestPlayStop();
-        return true;
+        if (code == '1' || c == '&') { setWorkspace (Workspace::play); return true; }
+        if (code == '2' || c == 0xe9) { setWorkspace (Workspace::edit); return true; }
+        if (code == 'N') { session.newProject(); return true; }
+        if (code == 'O') { chooseProjectToOpen(); return true; }
+        if (code == 'S' && mods.isShiftDown()) { chooseSaveAs(); return true; }
+        if (code == 'S') { if (session.saveProject()) session.notify (utf8 ("Projet enregistr\xc3\xa9")); return true; }
+        if (code == 'E') { openExportSheet(); return true; }
+        if (code == 'I') { if (mods.isShiftDown()) chooseYouTubeSong(); else chooseSong(); return true; }
+        if (mods.isAltDown() && code == juce::KeyPress::upKey)   { timeline.zoomTracks (1.25f); return true; }
+        if (mods.isAltDown() && code == juce::KeyPress::downKey) { timeline.zoomTracks (0.8f); return true; }
+        if (code == ',') { openAudioSettings(); return true; }
+        if (code == 'L' && mods.isShiftDown()) { setLightAppearance (theme::getAppearance() != theme::Appearance::light); return true; }
+
+        // Editing (the timeline's regions).
+        if (code == 'Z' && mods.isShiftDown()) { session.redoEdit(); return true; }
+        if (code == 'Z') { session.undoEdit(); return true; }
+        if (code == 'T') { session.splitAtPlayhead(); return true; }
+        if (code == 'D') { session.duplicateSelection(); return true; }
+        if (code == juce::KeyPress::leftKey)  { timeline.zoomBy (1.0 / 1.5); return true; }
+        if (code == juce::KeyPress::rightKey) { timeline.zoomBy (1.5); return true; }
+        return false;
     }
 
-    const auto character = key.getTextCharacter();
-
-    if (character == 'r' || character == 'R')
-    {
-        looper.requestRecord();
-        return true;
-    }
-    if (character == 'o' || character == 'O')
-    {
-        looper.requestOverdub();
-        return true;
-    }
-    if (character == 'u' || character == 'U')
-    {
-        looper.requestUndo();
-        return true;
-    }
+    // Performance shortcuts: everything is reachable without the mouse
+    // while both hands are on the guitar… or one foot near the keyboard.
+    if (key == juce::KeyPress::spaceKey)                 { session.togglePlay(); return true; }
+    if (key == juce::KeyPress::returnKey
+        || key == juce::KeyPress::homeKey)               { session.returnToStart(); return true; }
     if (key == juce::KeyPress (juce::KeyPress::backspaceKey, juce::ModifierKeys::shiftModifier, 0))
+                                                         { session.clearLoop(); return true; }
+    if (key == juce::KeyPress::backspaceKey
+        || key == juce::KeyPress::deleteKey)             { session.deleteSelection(); return true; }
+    if (key == juce::KeyPress::leftKey)                  { session.jumpBars (-1); return true; }
+    if (key == juce::KeyPress::rightKey)                 { session.jumpBars (1); return true; }
+    if (c == 'c')                                        { session.toggleCycle(); return true; }
+    if (c == 'r')                                        { session.recordLoop(); return true; }
+    if (c == 'o')                                        { session.toggleOverdub(); return true; }
+    if (c == 'u')                                        { session.undo(); return true; }
+    if (c == 't')                                        { recordTake(); return true; }
+    if (c == 'm')                                        { session.setMetronomeOn (! session.isMetronomeOn()); return true; }
+    if (c == 'y')                                        { setLibraryShown (! isLibraryShown()); return true; }
+    if (c == 'b')                                        { setInspectorShown (! isInspectorShown()); return true; }
+    if (c == '`' || c == '<' || c == '@')                { toggleMaximisedPanel (maximised != nullptr ? maximised : panelUnderMouse()); return true; }
+    if (c == '1')                                        { selectTrack (Track::amp); return true; }
+    if (c == '2')                                        { selectTrack (Track::loop); return true; }
+    if (c == '3')                                        { selectTrack (Track::camera); return true; }
+    if (c == '4')                                        { selectTrack (Track::song); return true; }
+    if (key == juce::KeyPress::escapeKey)
     {
-        looper.requestClear();
+        if (maximised != nullptr)
+            toggleMaximisedPanel (nullptr);
+        else
+            session.stopAll();
         return true;
     }
 
     return false;
 }
 
-void MainComponent::timerCallback()
+//==============================================================================
+juce::StringArray MainComponent::getMenuBarNames()
 {
-    auto cpu = deviceManager.getCpuUsage();
-    cpuPill.setText (juce::String (juce::roundToInt (cpu * 100)) + "% CPU");
+    return { "Fichier", utf8 ("\xc3\x89" "dition"), "Transport", "Audio", "Affichage" };
+}
 
-    if (auto* device = deviceManager.getCurrentAudioDevice())
+juce::PopupMenu MainComponent::getMenuForIndex (int index, const juce::String&)
+{
+    juce::PopupMenu menu;
+
+    auto makeItem = [] (int id, const juce::String& text, const juce::String& shortcut, bool enabled, bool ticked)
     {
-        auto bufferSize = device->getCurrentBufferSizeSamples();
-        auto sampleRate = device->getCurrentSampleRate();
-        auto totalSamples = bufferSize + device->getOutputLatencyInSamples() + device->getInputLatencyInSamples();
-        auto latencyMs = sampleRate > 0.0 ? ((double) totalSamples / sampleRate) * 1000.0 : 0.0;
-        latencyPill.setText (juce::String (latencyMs, 1) + " ms");
+        juce::PopupMenu::Item i (text);
+        i.itemID = id;
+        i.shortcutKeyDescription = shortcut;
+        i.isEnabled = enabled;
+        i.isTicked = ticked;
+        return i;
+    };
+    auto item = [&menu, &makeItem] (int id, const juce::String& text, const juce::String& shortcut, bool enabled = true, bool ticked = false)
+    {
+        menu.addItem (makeItem (id, text, shortcut, enabled, ticked));
+    };
+
+    if (index == 0)
+    {
+        item (newProject, "Nouveau projet", utf8 ("\xe2\x8c\x98N"));
+        item (openProject, utf8 ("Ouvrir\xe2\x80\xa6"), utf8 ("\xe2\x8c\x98O"));
+        menu.addSeparator();
+        item (saveProject, "Enregistrer", utf8 ("\xe2\x8c\x98S"));
+        item (saveProjectAs, utf8 ("Enregistrer sous\xe2\x80\xa6"), utf8 ("\xe2\x87\xa7\xe2\x8c\x98S"));
+        item (revealProject, "Afficher le projet dans le Finder", {}, session.hasProjectOnDisk());
+        menu.addSeparator();
+        item (importSongItem, utf8 ("Importer un morceau\xe2\x80\xa6"), utf8 ("\xe2\x8c\x98I"), ! session.isImportingSong());
+        item (importYouTubeItem, utf8 ("Importer depuis YouTube\xe2\x80\xa6"), utf8 ("\xe2\x87\xa7\xe2\x8c\x98I"), ! session.isImportingSong() && ! session.isDownloadingSong());
+        item (exportClip, utf8 ("Exporter le clip\xe2\x80\xa6"), utf8 ("\xe2\x8c\x98" "E"));
+    }
+    else if (index == 1)
+    {
+        const bool hasSelection = session.getSelection() != Session::Selection::none;
+        item (undoEdit, session.canUndoEdit() ? "Annuler : " + session.getUndoEditName() : juce::String ("Annuler"),
+              utf8 ("\xe2\x8c\x98Z"), session.canUndoEdit());
+        item (redoEdit, session.canRedoEdit() ? utf8 ("R\xc3\xa9tablir : ") + session.getRedoEditName() : utf8 ("R\xc3\xa9tablir"),
+              utf8 ("\xe2\x87\xa7\xe2\x8c\x98Z"), session.canRedoEdit());
+        menu.addSeparator();
+        item (splitRegion, utf8 ("Couper \xc3\xa0 la t\xc3\xaa" "te de lecture"), utf8 ("\xe2\x8c\x98T"));
+        item (duplicateRegion, utf8 ("Dupliquer la r\xc3\xa9gion"), utf8 ("\xe2\x8c\x98" "D"), hasSelection);
+        item (deleteRegion, utf8 ("Supprimer la r\xc3\xa9gion"), utf8 ("\xe2\x8c\xab"), hasSelection);
+        item (selectNone, utf8 ("Tout d\xc3\xa9s\xc3\xa9lectionner"), {}, hasSelection);
+        menu.addSeparator();
+        item (cycle, "Zone de cycle", "C", true, session.isCycleOn());
+    }
+    else if (index == 2)
+    {
+        const auto state = session.getEngine().getLooper().getState();
+        item (playPause, "Lecture / pause", "Espace");
+        item (returnToStart, utf8 ("Retour au d\xc3\xa9" "but"), utf8 ("Entr\xc3\xa9" "e"));
+        menu.addSeparator();
+        item (recordTakeItem, session.isRecordingTake() ? utf8 ("Arr\xc3\xaa" "ter la prise") : utf8 ("Enregistrer une prise (audio + cam\xc3\xa9ra)"), "T");
+        item (countInItem, utf8 ("D\xc3\xa9" "compte d'une mesure avant la prise"), {}, true, session.isCountInOn());
+        menu.addSeparator();
+        {
+            const bool looperShown = session.isLooperTrackVisible();
+            item (toggleLooperTrack, looperShown ? utf8 ("Retirer la piste Looper") : utf8 ("Ajouter une piste Looper"), {},
+                  ! looperShown || state == Looper::State::Empty);
+        }
+        item (loopCountInItem, utf8 ("D\xc3\xa9" "compte avant la boucle"), {}, true, session.isLoopCountInOn());
+        {
+            juce::PopupMenu lengths;
+            for (int i = 0; i < (int) std::size (loopBarChoices); ++i)
+                lengths.addItem (makeItem (loopBarsBase + i, loopBarChoices[i] == 0 ? juce::String ("Libre")
+                                                                                   : juce::String (loopBarChoices[i]) + (loopBarChoices[i] > 1 ? " mesures" : " mesure"),
+                                           {}, true, session.getLoopBars() == loopBarChoices[i]));
+            menu.addSubMenu ("Longueur de la boucle", lengths);
+        }
+        item (loopRecord, "Boucle : enregistrer / boucler", "R");
+        item (overdub, "Overdub", "O", state != Looper::State::Empty && state != Looper::State::Recording);
+        item (undoOverdub, "Retirer la couche", "U", session.getEngine().getLooper().isUndoAvailable());
+        item (clearLoop, "Effacer la boucle", utf8 ("\xe2\x87\xa7\xe2\x8c\xab"), state != Looper::State::Empty);
+        menu.addSeparator();
+        item (metronome, utf8 ("M\xc3\xa9tronome"), "M", true, session.isMetronomeOn());
+    }
+    else if (index == 3)
+    {
+        item (audioSettings, utf8 ("R\xc3\xa9glages audio\xe2\x80\xa6"), utf8 ("\xe2\x8c\x98,"));
     }
     else
     {
-        latencyPill.setText ("-- ms");
+        item (workspacePlay, "Jouer", utf8 ("\xe2\x8c\x98" "1"), true, workspace == Workspace::play);
+        item (workspaceEdit, "Monter", utf8 ("\xe2\x8c\x98" "2"), true, workspace == Workspace::edit);
+        menu.addSeparator();
+        item (showLibrary, utf8 ("Biblioth\xc3\xa8que"), "Y", true, isLibraryShown());
+        item (showInspector, "Inspecteur", "B", true, isInspectorShown());
+        item (maximisePanel, maximised != nullptr ? utf8 ("R\xc3\xa9tablir les panneaux") : utf8 ("Agrandir le panneau sous la souris"), "`");
+        item (resetLayoutItem, utf8 ("R\xc3\xa9initialiser la disposition"), {});
+        menu.addSeparator();
+        item (magnetItem, utf8 ("Aimant de la t\xc3\xaate de lecture"), {}, true, session.isMagnetOn());
+        item (zoomIn, "Zoom avant", utf8 ("\xe2\x8c\x98\xe2\x86\x92"));
+        item (zoomOut, utf8 ("Zoom arri\xc3\xa8re"), utf8 ("\xe2\x8c\x98\xe2\x86\x90"));
+        item (zoomFit, utf8 ("Tout le morceau \xc3\xa0 l'\xc3\xa9" "cran"), {});
+        item (tracksTaller, "Pistes plus hautes", utf8 ("\xe2\x8c\xa5\xe2\x8c\x98\xe2\x86\x91"));
+        item (tracksShorter, "Pistes plus basses", utf8 ("\xe2\x8c\xa5\xe2\x8c\x98\xe2\x86\x93"));
+        menu.addSeparator();
+
+        juce::PopupMenu sizes;
+        const float current = juce::Desktop::getInstance().getGlobalScaleFactor();
+        for (int i = 0; i < (int) std::size (uiScales); ++i)
+            sizes.addItem (makeItem (uiScaleBase + i, juce::String (juce::roundToInt (uiScales[i] * 100.0f)) + utf8 ("\xc2\xa0%"), {}, true,
+                                     std::abs (uiScales[i] - current) < 0.01f));
+        menu.addSubMenu ("Taille de l'interface", sizes);
+        menu.addSeparator();
+        juce::PopupMenu themes;
+        const auto mode = getAppearanceMode();
+        themes.addItem (makeItem (appearanceSystem, utf8 ("Automatique (syst\xc3\xa8me)"), {}, true, mode == AppearanceMode::system));
+        themes.addItem (makeItem (appearanceLight, "Clair", {}, true, mode == AppearanceMode::light));
+        themes.addItem (makeItem (appearanceDark, "Sombre", {}, true, mode == AppearanceMode::dark));
+        menu.addSubMenu (utf8 ("Th\xc3\xa8me"), themes);
     }
 
-    levelMeter.setLevel (ampEngine.getPeakLevel());
-    updateLooperStatus();
+    return menu;
 }
 
-void MainComponent::updateLooperStatus()
+void MainComponent::menuItemSelected (int id, int)
 {
-    using State = Looper::State;
-    const auto s = looper.getState();
-    const bool hasContent = looper.getRecordedLengthSamples() > 0;
-
-    juce::String text;
-    switch (s)
+    if (id >= uiScaleBase && id < uiScaleBase + (int) std::size (uiScales))
     {
-        case State::Empty:        text = "Vide"; break;
-        case State::Recording:    text = juce::CharPointer_UTF8 ("Enregistrement\xe2\x80\xa6"); break;
-        case State::Playing:      text = juce::CharPointer_UTF8 ("Lecture \xe2\x80\x94 "); break;
-        case State::Overdubbing:  text = juce::CharPointer_UTF8 ("Overdub\xe2\x80\xa6 \xe2\x80\x94 "); break;
-        case State::Stopped:      text = juce::CharPointer_UTF8 ("Pause \xe2\x80\x94 "); break;
-    }
-    if (hasContent && s != State::Recording)
-        text << juce::String (looper.getLoopLengthSeconds(), 1) << " s";
-
-    looperStatusLabel.setText (text, juce::dontSendNotification);
-    loopProgress.setProgress (looper.getPlayheadFraction());
-    loopProgress.setRecording (s == State::Recording);
-
-    // Buttons reflect what's actually legal to do from the current engine
-    // state, rather than always being clickable and silently no-op-ing.
-    using namespace roadie::theme;
-
-    recordButton.setButtonText (s == State::Recording ? juce::String (juce::CharPointer_UTF8 ("Stop"))
-                                                        : juce::String (juce::CharPointer_UTF8 ("Enregistrer")));
-    recordButton.setEnabled (s == State::Empty || s == State::Recording);
-    recordButton.setColour (juce::TextButton::buttonColourId, s == State::Recording ? rec : surfaceRaised);
-
-    overdubButton.setButtonText (s == State::Overdubbing ? juce::String ("Stop overdub") : juce::String ("Overdub"));
-    overdubButton.setEnabled (hasContent && (s == State::Playing || s == State::Overdubbing || s == State::Stopped));
-    overdubButton.setColour (juce::TextButton::buttonColourId,
-                              s == State::Overdubbing ? loopAccent.withAlpha (0.35f) : surfaceRaised);
-
-    playStopButton.setButtonText (s == State::Playing || s == State::Overdubbing
-                                       ? juce::String (juce::CharPointer_UTF8 ("Pause"))
-                                       : juce::String (juce::CharPointer_UTF8 ("Lecture")));
-    playStopButton.setEnabled (hasContent && s != State::Recording && s != State::Overdubbing);
-
-    undoButton.setEnabled (looper.isUndoAvailable() && s != State::Overdubbing);
-    clearButton.setEnabled (s != State::Empty);
-    exportLoopButton.setEnabled (hasContent && s != State::Recording && s != State::Overdubbing);
-
-    // Component-level alpha so disabled buttons are unmistakably dimmed
-    // (background-colour tricks alone read too close to the enabled state
-    // when every surface in this theme is already dark).
-    for (auto* b : { &recordButton, &overdubButton, &playStopButton, &undoButton, &clearButton, &exportLoopButton })
-        b->setAlpha (b->isEnabled() ? 1.0f : 0.35f);
-}
-
-void MainComponent::openNamFileChooser()
-{
-    fileChooser = std::make_unique<juce::FileChooser> ("Choisis une capture NAM (.nam)",
-                                                         juce::File(),
-                                                         "*.nam");
-
-    constexpr auto flags = juce::FileBrowserComponent::openMode
-                          | juce::FileBrowserComponent::canSelectFiles;
-
-    fileChooser->launchAsync (flags, [this] (const juce::FileChooser& fc)
-    {
-        auto file = fc.getResult();
-        if (file == juce::File())
-            return;
-
-        juce::String error;
-        if (ampEngine.loadModel (file, error))
-            ampSubtitle.setText (ampEngine.getModelName(), juce::dontSendNotification);
-        else
-            ampSubtitle.setText ("Erreur : " + error, juce::dontSendNotification);
-    });
-}
-
-void MainComponent::openIrFileChooser()
-{
-    irFileChooser = std::make_unique<juce::FileChooser> ("Choisis une IR de cabinet (.wav)",
-                                                           juce::File(),
-                                                           "*.wav");
-
-    constexpr auto flags = juce::FileBrowserComponent::openMode
-                          | juce::FileBrowserComponent::canSelectFiles;
-
-    irFileChooser->launchAsync (flags, [this] (const juce::FileChooser& fc)
-    {
-        auto file = fc.getResult();
-        if (file == juce::File())
-            return;
-
-        ampEngine.loadImpulseResponse (file);
-        cabLabel.setText (ampEngine.getIrName(), juce::dontSendNotification);
-    });
-}
-
-void MainComponent::exportLoopToWav()
-{
-    const auto loopState = looper.getState();
-    if (loopState == Looper::State::Recording || loopState == Looper::State::Overdubbing)
-    {
-        looperStatusLabel.setText (juce::CharPointer_UTF8 ("Arr\xc3\xaa"
-                                                             "te l'enregistrement avant d'exporter"),
-                                    juce::dontSendNotification);
+        setUiScale (uiScales[id - uiScaleBase]);
         return;
     }
 
-    const int numSamples = looper.getRecordedLengthSamples();
-    if (numSamples <= 0)
-        return;
-
-    exportFileChooser = std::make_unique<juce::FileChooser> ("Exporter la boucle en WAV",
-                                                               juce::File::getSpecialLocation (
-                                                                   juce::File::userDocumentsDirectory),
-                                                               "*.wav");
-
-    constexpr auto flags = juce::FileBrowserComponent::saveMode
-                          | juce::FileBrowserComponent::warnAboutOverwriting;
-
-    exportFileChooser->launchAsync (flags, [this, numSamples] (const juce::FileChooser& fc)
+    switch (id)
     {
-        auto file = fc.getResult();
-        if (file == juce::File())
-            return;
-
-        file.deleteFile();
-        std::unique_ptr<juce::FileOutputStream> stream (file.createOutputStream());
-        if (stream == nullptr)
-            return;
-
-        juce::WavAudioFormat wavFormat;
-        std::unique_ptr<juce::AudioFormatWriter> writer (
-            wavFormat.createWriterFor (stream.get(), looper.getSampleRate(), 1, 24, {}, 0));
-
-        if (writer == nullptr)
-            return;
-
-        stream.release(); // the writer now owns the stream
-
-        const auto& data = looper.getBufferForExport();
-        const float* channels[1] = { data.data() };
-        writer->writeFromFloatArrays (channels, 1, numSamples);
-    });
+        case newProject:      session.newProject(); break;
+        case openProject:     chooseProjectToOpen(); break;
+        case saveProject:     if (session.saveProject()) session.notify (utf8 ("Projet enregistr\xc3\xa9")); break;
+        case saveProjectAs:   chooseSaveAs(); break;
+        case revealProject:   session.getProject().folder.revealToUser(); break;
+        case exportClip:      openExportSheet(); break;
+        case importSongItem:  chooseSong(); break;
+        case importYouTubeItem: chooseYouTubeSong(); break;
+        case loopCountInItem: session.setLoopCountInOn (! session.isLoopCountInOn()); break;
+        case magnetItem:      session.setMagnetOn (! session.isMagnetOn()); break;
+        case tracksTaller:    timeline.zoomTracks (1.25f); break;
+        case tracksShorter:   timeline.zoomTracks (0.8f); break;
+        case undoEdit:        session.undoEdit(); break;
+        case redoEdit:        session.redoEdit(); break;
+        case splitRegion:     session.splitAtPlayhead(); break;
+        case duplicateRegion: session.duplicateSelection(); break;
+        case deleteRegion:    session.deleteSelection(); break;
+        case selectNone:      session.clearSelection(); break;
+        case cycle:           session.toggleCycle(); break;
+        case playPause:       session.togglePlay(); break;
+        case recordTakeItem:  recordTake(); break;
+        case countInItem:     session.setCountInOn (! session.isCountInOn()); break;
+        case toggleLooperTrack: session.setLooperTrackVisible (! session.isLooperTrackVisible()); break;
+        case loopRecord:      session.recordLoop(); break;
+        case overdub:         session.toggleOverdub(); break;
+        case undoOverdub:     session.undo(); break;
+        case clearLoop:       session.clearLoop(); break;
+        case returnToStart:   session.returnToStart(); break;
+        case metronome:       session.setMetronomeOn (! session.isMetronomeOn()); break;
+        case audioSettings:   openAudioSettings(); break;
+        case workspacePlay:   setWorkspace (Workspace::play); break;
+        case workspaceEdit:   setWorkspace (Workspace::edit); break;
+        case showLibrary:     setLibraryShown (! isLibraryShown()); break;
+        case showInspector:   setInspectorShown (! isInspectorShown()); break;
+        case maximisePanel:   toggleMaximisedPanel (maximised != nullptr ? maximised : (panelUnderMouse() != nullptr ? panelUnderMouse() : (workspace == Workspace::play ? (juce::Component*) &monitor : &timeline))); break;
+        case resetLayoutItem: resetLayout(); break;
+        case zoomIn:          timeline.zoomBy (1.5); break;
+        case zoomOut:         timeline.zoomBy (1.0 / 1.5); break;
+        case zoomFit:         timeline.zoomToFit(); break;
+        case lightAppearance: setLightAppearance (theme::getAppearance() != theme::Appearance::light); break;
+        case appearanceSystem: setAppearanceMode (AppearanceMode::system); break;
+        case appearanceLight:  setAppearanceMode (AppearanceMode::light); break;
+        case appearanceDark:   setAppearanceMode (AppearanceMode::dark); break;
+        default:
+            if (id >= loopBarsBase && id < loopBarsBase + (int) std::size (loopBarChoices))
+                session.setLoopBars (loopBarChoices[id - loopBarsBase]);
+            break;
+    }
 }
+
+//==============================================================================
+bool MainComponent::isInterestedInFileDrag (const juce::StringArray& files)
+{
+    for (const auto& path : files)
+    {
+        const juce::File f (path);
+        if (f.hasFileExtension (".nam;.wav;.aif;.aiff;.json;.mp3;.m4a;.aac;.flac;.caf;.mp4") || f.hasFileExtension (Project::extension) || f.isDirectory())
+        {
+            dropHighlight = true;
+            repaint();
+            return true;
+        }
+    }
+    return false;
+}
+
+void MainComponent::filesDropped (const juce::StringArray& files, int, int)
+{
+    dropHighlight = false;
+    repaint();
+
+    for (const auto& path : files)
+    {
+        const juce::File f (path);
+        if (f.hasFileExtension (".nam"))
+            session.loadCapture (f);
+        else if (Session::isSongFile (f))
+        {
+            session.importSong (f);
+            selectTrack (Track::song);
+        }
+        else if (f.hasFileExtension (".wav;.aif;.aiff"))
+            session.loadImpulseResponse (f); // a short file: a cab IR
+        else if (f.hasFileExtension (Project::extension) || f.getFileName() == "project.json")
+            session.openProject (f);
+        else if (f.isDirectory())
+            session.addCaptureFolder (f);
+    }
+}
+
+void MainComponent::fileDragExit (const juce::StringArray&)
+{
+    dropHighlight = false;
+    repaint();
+}
+
+//==============================================================================
+namespace
+{
+// Réglages audio: JUCE's device selector, plus the recording-delay
+// correction for drivers that under-report their latency.
+class AudioSettingsPanel : public juce::Component,
+                           private juce::Timer
+{
+public:
+    explicit AudioSettingsPanel (Session& s)
+        : session (s), selector (s.getDeviceManager(), 1, 2, 2, 2, false, false, true, false)
+    {
+        addAndMakeVisible (selector);
+
+        title.setText (utf8 ("Compensation de latence"), juce::dontSendNotification);
+        title.setFont (fonts::semibold (13.0f));
+        addAndMakeVisible (title);
+
+        adjustment.setSliderStyle (juce::Slider::LinearHorizontal);
+        adjustment.setTextBoxStyle (juce::Slider::TextBoxRight, false, 70, 22);
+        adjustment.setRange (-50.0, 100.0, 0.5);
+        adjustment.setTextValueSuffix (" ms");
+        adjustment.setDoubleClickReturnValue (true, 0.0);
+        adjustment.setValue (session.getLatencyAdjustmentMs(), juce::dontSendNotification);
+        adjustment.onValueChange = [this] { session.setLatencyAdjustmentMs (adjustment.getValue()); update(); };
+        addAndMakeVisible (adjustment);
+
+        explanation.setFont (fonts::body (12.0f));
+        explanation.setColour (juce::Label::textColourId, theme::textMuted);
+        explanation.setJustificationType (juce::Justification::topLeft);
+        addAndMakeVisible (explanation);
+
+        update();
+        startTimer (500);
+        setSize (480, 540);
+    }
+
+    void resized() override
+    {
+        auto area = getLocalBounds().reduced (0, 8);
+        auto bottom = area.removeFromBottom (100).reduced (16, 0);
+        selector.setBounds (area);
+        title.setBounds (bottom.removeFromTop (22));
+        adjustment.setBounds (bottom.removeFromTop (28));
+        explanation.setBounds (bottom.withTrimmedTop (4));
+    }
+
+private:
+    void timerCallback() override { update(); }
+
+    void update()
+    {
+        const auto& engine = session.getEngine();
+        const double total = engine.getRecordLatencySamples() / engine.getSampleRate() * 1000.0;
+        explanation.setText (utf8 ("Aller-retour annonc\xc3\xa9 par l'interface : ") + juce::String (engine.getRoundTripLatencyMs(), 1)
+                                 + utf8 (" ms. Les prises et les boucles sont recal\xc3\xa9" "es de ") + juce::String (total, 1)
+                                 + utf8 (" ms, l\xc3\xa0 o\xc3\xb9 tu les as jou\xc3\xa9" "es. Ajoute la diff\xc3\xa9rence si elles tombent encore en retard."),
+                             juce::dontSendNotification);
+    }
+
+    Session& session;
+    juce::AudioDeviceSelectorComponent selector;
+    juce::Label title, explanation;
+    juce::Slider adjustment;
+};
+} // namespace
 
 void MainComponent::openAudioSettings()
 {
-    auto* selector = new juce::AudioDeviceSelectorComponent (deviceManager, 1, 2, 2, 2, false, false, true, false);
-    selector->setSize (460, 420);
-
     juce::DialogWindow::LaunchOptions options;
-    options.content.setOwned (selector);
-    options.dialogTitle = juce::CharPointer_UTF8 ("R\xc3\xa9glages audio");
-    options.dialogBackgroundColour = roadie::theme::surface;
+    options.content.setOwned (new AudioSettingsPanel (session));
+    options.dialogTitle = utf8 ("R\xc3\xa9glages audio");
+    options.dialogBackgroundColour = theme::surface;
     options.escapeKeyTriggersCloseButton = true;
     options.useNativeTitleBar = true;
     options.resizable = false;
     options.launchAsync();
 }
 
-void MainComponent::updateKnobLabel (juce::Label& label, double valueDb)
+void MainComponent::openExportSheet()
 {
-    label.setText (juce::String (valueDb, 1) + " dB", juce::dontSendNotification);
+    exportSheet.open();
 }
 
-void MainComponent::Pill::paint (juce::Graphics& g)
+void MainComponent::chooseProjectToOpen()
 {
-    using namespace roadie::theme;
-    auto bounds = getLocalBounds().toFloat();
-    g.setColour (surfaceSunken);
-    g.fillRoundedRectangle (bounds, bounds.getHeight() * 0.5f);
-    g.setColour (border);
-    g.drawRoundedRectangle (bounds.reduced (0.5f), bounds.getHeight() * 0.5f, 1.0f);
-    g.setColour (textMuted);
-    g.setFont (12.0f);
-    g.drawText (text, getLocalBounds(), juce::Justification::centred);
+    chooser = std::make_unique<juce::FileChooser> ("Ouvrir un projet Roadie", Project::getDefaultProjectsFolder(), "*.roadie;project.json");
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles
+                              | juce::FileBrowserComponent::canSelectDirectories,
+                          [this] (const juce::FileChooser& fc)
+                          {
+                              const auto f = fc.getResult();
+                              if (f != juce::File())
+                                  if (session.openProject (f))
+                                      session.notify (utf8 ("Projet ouvert : ") + session.getProjectName());
+                          });
 }
 
-void MainComponent::LevelMeter::paint (juce::Graphics& g)
+void MainComponent::chooseSong()
 {
-    using namespace roadie::theme;
-    auto bounds = getLocalBounds().toFloat();
-    g.setColour (surfaceSunken);
-    g.fillRoundedRectangle (bounds, bounds.getHeight() * 0.5f);
-
-    auto db = juce::Decibels::gainToDecibels (level, -60.0f);
-    auto proportion = juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 60.0f);
-
-    if (proportion > 0.0f)
+    const auto start = juce::File::getSpecialLocation (juce::File::userMusicDirectory);
+    chooser = std::make_unique<juce::FileChooser> ("Choisis un morceau pour jouer dessus", start, "*.mp3;*.m4a;*.aac;*.wav;*.aif;*.aiff;*.flac;*.caf");
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles, [this] (const juce::FileChooser& fc)
     {
-        auto fill = bounds.withWidth (bounds.getWidth() * proportion);
-        g.setColour (ampAccent);
-        g.fillRoundedRectangle (fill, bounds.getHeight() * 0.5f);
-    }
+        const auto f = fc.getResult();
+        if (f.existsAsFile())
+        {
+            session.importSong (f);
+            selectTrack (Track::song);
+        }
+    });
 }
 
-void MainComponent::ProgressBar::paint (juce::Graphics& g)
+void MainComponent::chooseSaveAs()
 {
-    using namespace roadie::theme;
-    auto bounds = getLocalBounds().toFloat();
-    g.setColour (surfaceSunken);
-    g.fillRoundedRectangle (bounds, bounds.getHeight() * 0.5f);
-
-    if (recording)
+    const auto start = Project::getDefaultProjectsFolder().getChildFile (session.getProjectName() + Project::extension);
+    Project::getDefaultProjectsFolder().createDirectory();
+    chooser = std::make_unique<juce::FileChooser> ("Enregistrer le projet sous", start, "*.roadie");
+    chooser->launchAsync (juce::FileBrowserComponent::saveMode, [this] (const juce::FileChooser& fc)
     {
-        // Loop length isn't fixed yet while recording, so a fraction would be
-        // meaningless — show the whole bar lit instead, signalling "capturing".
-        g.setColour (rec);
-        g.fillRoundedRectangle (bounds, bounds.getHeight() * 0.5f);
-    }
-    else if (progress > 0.0f)
-    {
-        auto fill = bounds.withWidth (bounds.getWidth() * juce::jlimit (0.0f, 1.0f, progress));
-        g.setColour (loopAccent);
-        g.fillRoundedRectangle (fill, bounds.getHeight() * 0.5f);
-    }
-}
-
-void MainComponent::paint (juce::Graphics& g)
-{
-    using namespace roadie::theme;
-    g.fillAll (background);
-
-    for (auto* cardArea : { &ampCardArea, &looperCardArea })
-    {
-        g.setColour (surface);
-        g.fillRoundedRectangle (cardArea->toFloat(), 16.0f);
-        g.setColour (border);
-        g.drawRoundedRectangle (cardArea->toFloat().reduced (0.5f), 16.0f, 1.0f);
-    }
-}
-
-void MainComponent::resized()
-{
-    auto area = getLocalBounds().reduced (16);
-
-    auto header = area.removeFromTop (34);
-    brandLabel.setBounds (header.removeFromLeft (90));
-    settingsButton.setBounds (header.removeFromRight (96));
-    header.removeFromRight (8);
-    latencyPill.setBounds (header.removeFromRight (100));
-    header.removeFromRight (6);
-    cpuPill.setBounds (header.removeFromRight (84));
-
-    area.removeFromTop (16);
-
-    ampCardArea = area.removeFromTop (332);
-    auto card = ampCardArea.reduced (18);
-
-    auto titleRow = card.removeFromTop (28);
-    ampTitle.setBounds (titleRow.removeFromLeft (120));
-    loadNamButton.setBounds (titleRow.removeFromRight (190));
-
-    ampSubtitle.setBounds (card.removeFromTop (20));
-    card.removeFromTop (10);
-
-    auto cabRow = card.removeFromTop (24);
-    loadIrButton.setBounds (cabRow.removeFromRight (140));
-    cabRow.removeFromRight (8);
-    cabLabel.setBounds (cabRow);
-    card.removeFromTop (14);
-
-    auto knobRow = card.removeFromTop (118);
-    auto knobWidth = knobRow.getWidth() / 2;
-    auto inputArea = knobRow.removeFromLeft (knobWidth);
-    auto outputArea = knobRow;
-
-    auto layoutKnob = [] (juce::Rectangle<int> a, juce::Slider& knob, juce::Label& title, juce::Label& value)
-    {
-        title.setBounds (a.removeFromTop (16));
-        auto knobBounds = a.removeFromTop (76).withSizeKeepingCentre (76, 76);
-        knob.setBounds (knobBounds);
-        value.setBounds (a);
-    };
-
-    layoutKnob (inputArea.reduced (20, 0), inputGainKnob, inputGainTitle, inputGainValue);
-    layoutKnob (outputArea.reduced (20, 0), outputVolumeKnob, outputVolumeTitle, outputVolumeValue);
-
-    card.removeFromTop (14);
-    meterLabel.setBounds (card.removeFromTop (16));
-    card.removeFromTop (4);
-    levelMeter.setBounds (card.removeFromTop (10));
-
-    area.removeFromTop (16);
-
-    looperCardArea = area.removeFromTop (180);
-    auto loopCard = looperCardArea.reduced (18);
-
-    auto loopTitleRow = loopCard.removeFromTop (24);
-    looperTitle.setBounds (loopTitleRow.removeFromLeft (80));
-    exportLoopButton.setBounds (loopTitleRow.removeFromRight (120));
-    loopTitleRow.removeFromRight (8);
-    looperStatusLabel.setBounds (loopTitleRow);
-    loopCard.removeFromTop (10);
-
-    auto transportRow = loopCard.removeFromTop (34);
-    auto transportWidth = transportRow.getWidth() / 5;
-    recordButton.setBounds (transportRow.removeFromLeft (transportWidth).reduced (3, 0));
-    overdubButton.setBounds (transportRow.removeFromLeft (transportWidth).reduced (3, 0));
-    playStopButton.setBounds (transportRow.removeFromLeft (transportWidth).reduced (3, 0));
-    undoButton.setBounds (transportRow.removeFromLeft (transportWidth).reduced (3, 0));
-    clearButton.setBounds (transportRow.reduced (3, 0));
-    loopCard.removeFromTop (14);
-
-    auto bpmRow = loopCard.removeFromTop (26);
-    metronomeToggle.setBounds (bpmRow.removeFromRight (130));
-    bpmRow.removeFromRight (10);
-    bpmValueLabel.setBounds (bpmRow.removeFromLeft (70));
-    bpmSlider.setBounds (bpmRow);
-    loopCard.removeFromTop (12);
-
-    loopProgress.setBounds (loopCard.removeFromTop (8));
+        const auto f = fc.getResult();
+        if (f != juce::File())
+            session.saveProjectAs (f);
+    });
 }
