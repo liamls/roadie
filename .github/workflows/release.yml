@@ -1,0 +1,149 @@
+name: Release
+
+# Push a tag vX.Y.Z: runs the CI tests, then publishes a GitHub release with one DMG
+# per architecture. Without the Apple secrets the DMGs are ad-hoc signed
+# (usable for testing, refused by Gatekeeper on other Macs) and the release
+# says so. See docs/releasing.md.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Test run: version label, e.g. 0.2.0-rc.1 (builds the DMGs, publishes nothing)"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Same checks as a PR (tests, bundle): nothing is built or published if they fail.
+  tests:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: DMG (${{ matrix.arch }})
+    needs: tests
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15, arch: arm64 }
+          - { runner: macos-15-intel, arch: x86_64 }
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          # Inputs go through the environment, never pasted into the script.
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            LABEL="$INPUT_VERSION"
+          else
+            LABEL="${GITHUB_REF_NAME#v}"
+          fi
+          CMAKE_VERSION=$(sed -n 's/^project(Roadie VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          if [[ "${LABEL%%-*}" != "$CMAKE_VERSION" ]]; then
+            echo "::error::The tag/label ($LABEL) does not match project(Roadie VERSION $CMAKE_VERSION) in CMakeLists.txt"
+            exit 1
+          fi
+          echo "label=$LABEL" >> "$GITHUB_OUTPUT"
+
+      - name: Import the Developer ID certificate
+        id: signing
+        run: |
+          if [[ -z "$APPLE_CERTIFICATE" ]]; then
+            echo "::warning::No APPLE_CERTIFICATE secret: ad-hoc signature, no notarisation."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          KEYCHAIN="$RUNNER_TEMP/roadie.keychain-db"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$KEYCHAIN" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -1)
+          [[ -n "$IDENTITY" ]] || { echo "::error::No 'Developer ID Application' identity in the certificate."; exit 1; }
+          echo "::add-mask::$IDENTITY"
+          echo "identity=$IDENTITY" >> "$GITHUB_OUTPUT"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: release-${{ matrix.arch }}
+          max-size: 600M
+
+      - name: Build, sign, notarise, pack
+        env:
+          ROADIE_BUILD_DIR: build-release
+          ROADIE_VERSION_LABEL: ${{ steps.version.outputs.label }}
+          ROADIE_SIGN_IDENTITY: ${{ steps.signing.outputs.identity }}
+          ROADIE_NOTARY_APPLE_ID: ${{ steps.signing.outputs.signed == 'true' && env.APPLE_ID || '' }}
+          ROADIE_NOTARY_TEAM_ID: ${{ env.APPLE_TEAM_ID }}
+          ROADIE_NOTARY_PASSWORD: ${{ env.APPLE_PASSWORD }}
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CMAKE_OBJCXX_COMPILER_LAUNCHER: ccache
+        run: Tools/package_macos.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: roadie-${{ matrix.arch }}
+          path: |
+            dist/*.dmg
+            dist/*.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Same condition as the build job: no certificate secret, no signature.
+          SIGNED: ${{ secrets.APPLE_CERTIFICATE != '' }}
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          FLAGS=(--generate-notes --title "Roadie ${TAG#v}")
+          [[ "$TAG" == v0.* || "$TAG" == *-* ]] && FLAGS+=(--prerelease)
+          NOTES=""
+          if [[ "$SIGNED" != "true" ]]; then
+            NOTES=$'> [!WARNING]\n> This version is not signed with a Developer ID certificate: macOS rejects it by default. Right-click › Open, or `xattr -dr com.apple.quarantine /Applications/Roadie.app`.\n\n'
+          fi
+          NOTES+=$'Files: `arm64` for Apple Silicon Macs, `x86_64` for Intel Macs. Verify with the attached `.sha256`.\n'
+          FLAGS+=(--notes "$NOTES")
+          gh release create "$TAG" "${FLAGS[@]}" artifacts/*.dmg artifacts/*.sha256

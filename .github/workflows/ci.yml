@@ -1,0 +1,97 @@
+name: CI
+
+# No CI on pushes to other branches: it runs on PRs, on any direct push to main
+# (which shouldn't happen, but is checked anyway), and the Release workflow calls
+# it again before publishing anything.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # A PR must say what changed for users, unless labelled `no-changelog`.
+  changelog:
+    name: Changelog
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: CHANGELOG.md must be updated
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          SKIP: ${{ contains(github.event.pull_request.labels.*.name, 'no-changelog') }}
+        run: |
+          if [[ "$SKIP" == "true" ]]; then
+            echo "Label no-changelog: skipped."
+          elif git diff --quiet "$BASE"...HEAD -- CHANGELOG.md; then
+            echo "::error::CHANGELOG.md is not updated. Add a line under [Unreleased], or label the PR 'no-changelog' (then re-run this job)."
+            exit 1
+          fi
+
+  shellcheck:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck Tools/*.sh
+
+  # The real thing: the app, and the engine tests (fake audio device, real NAM
+  # capture, MP4 export). arm64 and Intel, since Roadie ships for both.
+  macos:
+    name: Build + tests (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15, arch: arm64 }
+          - { runner: macos-15-intel, arch: x86_64 }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: macos-${{ matrix.arch }}
+          max-size: 600M
+      - name: Configure
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_OBJCXX_COMPILER_LAUNCHER=ccache
+      - name: Build
+        run: cmake --build build --target Roadie RoadieLooperTests RoadieDspTests RoadieEngineTests -j "$(sysctl -n hw.ncpu)"
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Check the bundle
+        run: |
+          APP=build/Roadie_artefacts/Release/Roadie.app
+          test -x "$APP/Contents/MacOS/Roadie"
+          test -x "$APP/Contents/Resources/yt-dlp"
+          codesign --verify --deep --strict "$APP"
+
+  # One required check for branch protection.
+  ci-ok:
+    name: CI OK
+    if: always()
+    needs: [changelog, shellcheck, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All jobs must have succeeded
+        run: |
+          [[ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" == "false" ]]

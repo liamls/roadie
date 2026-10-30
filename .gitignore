@@ -1,0 +1,10 @@
+build/
+cmake-build-*/
+.vs/
+.vscode/
+*.xcodeproj/
+out/
+.DS_Store
+libs/yt-dlp/
+dist/
+build-release/
