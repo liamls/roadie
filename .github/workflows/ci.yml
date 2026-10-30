@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build and run
         run: |
           set -euxo pipefail
@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: shellcheck Tools/*.sh
 
   # The real thing: the app, and the engine tests (fake audio device, real NAM
@@ -52,7 +52,7 @@ jobs:
           - { runner: macos-15, arch: arm64 }
           - { runner: macos-15-intel, arch: x86_64 }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - uses: hendrikmuhs/ccache-action@v1.2

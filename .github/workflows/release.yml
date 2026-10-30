@@ -40,7 +40,7 @@ jobs:
       APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -100,7 +100,7 @@ jobs:
           CMAKE_OBJCXX_COMPILER_LAUNCHER: ccache
         run: Tools/package_macos.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: roadie-${{ matrix.arch }}
           path: |
@@ -110,7 +110,7 @@ jobs:
 
       - name: Remember whether the build was signed
         run: echo "${{ steps.signing.outputs.signed }}" > dist/signed-${{ matrix.arch }}.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: signed-${{ matrix.arch }}
           path: dist/signed-${{ matrix.arch }}.txt
@@ -121,8 +121,8 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
