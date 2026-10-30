@@ -1615,19 +1615,21 @@ void Session::importSongFromUrl (const juce::String& rawUrl)
         return;
     }
 
-    juce::File tool;
-    for (const char* candidate : { "/opt/homebrew/bin/yt-dlp", "/usr/local/bin/yt-dlp", "/usr/bin/yt-dlp" })
-        if (juce::File (candidate).existsAsFile())
-        {
-            tool = juce::File (candidate);
-            break;
-        }
-    if (tool == juce::File())
-        if (const auto local = juce::File::getSpecialLocation (juce::File::userHomeDirectory).getChildFile (".local/bin/yt-dlp"); local.existsAsFile())
-            tool = local;
+    // The copy embedded in the bundle first; Homebrew/user installs only as a fallback.
+    juce::File tool = juce::File::getSpecialLocation (juce::File::currentApplicationFile).getChildFile ("Contents/Resources/yt-dlp");
+    if (! tool.existsAsFile())
+    {
+        tool = juce::File();
+        for (const char* candidate : { "/opt/homebrew/bin/yt-dlp", "/usr/local/bin/yt-dlp", "/usr/bin/yt-dlp" })
+            if (juce::File (candidate).existsAsFile())
+            {
+                tool = juce::File (candidate);
+                break;
+            }
+    }
     if (tool == juce::File())
     {
-        notify (utf8 ("Il manque yt-dlp : installe-le avec \xc2\xab brew install yt-dlp \xc2\xbb, puis r\xc3\xa9" "essaie."));
+        notify (utf8 ("yt-dlp est introuvable dans l'application : recompile Roadie."));
         return;
     }
 
@@ -1645,7 +1647,7 @@ void Session::importSongFromUrl (const juce::String& rawUrl)
         if (folder.createDirectory())
         {
             // The URL is one argument after "--": never read as an option, never through a shell.
-            juce::StringArray args { tool.getFullPathName(), "-f", "bestaudio[ext=m4a]/bestaudio", "--no-playlist", "--no-progress",
+            juce::StringArray args { tool.getFullPathName(), "-f", "bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/best[ext=mp4]", "--no-playlist", "--no-progress",
                                      "--no-warnings", "-o", folder.getChildFile ("%(title).80s.%(ext)s").getFullPathName(),
                                      "--print", "after_move:filepath", "--", url };
             juce::ChildProcess process;
@@ -1661,7 +1663,7 @@ void Session::importSongFromUrl (const juce::String& rawUrl)
                 if (! result.existsAsFile())
                     error = utf8 ("Le t\xc3\xa9l\xc3\xa9" "chargement a \xc3\xa9" "chou\xc3\xa9 (lien priv\xc3\xa9, vid\xc3\xa9o indisponible, ou yt-dlp \xc3\xa0 mettre \xc3\xa0 jour).");
                 else if (! result.hasFileExtension (".m4a;.mp4;.mp3;.wav;.aac"))
-                    error = utf8 ("Format audio non lisible (") + result.getFileExtension() + utf8 (") \xe2\x80\x94 installe ffmpeg : brew install ffmpeg.");
+                    error = utf8 ("Format audio non lisible (") + result.getFileExtension() + utf8 (") \xe2\x80\x94 aucun flux AAC disponible pour cette vid\xc3\xa9o.");
             }
             else
             {

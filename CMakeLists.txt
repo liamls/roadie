@@ -19,6 +19,7 @@ juce_add_gui_app(Roadie
     PRODUCT_NAME "Roadie"
     COMPANY_NAME "Roadie"
     BUNDLE_ID "app.roadie.Roadie"
+    ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/docs/logo/roadie-icon.png"
     MICROPHONE_PERMISSION_ENABLED TRUE
     MICROPHONE_PERMISSION_TEXT "Roadie a besoin de l'entrée audio pour capter ta guitare, et du micro de la caméra pour la synchroniser."
     CAMERA_PERMISSION_ENABLED TRUE
@@ -95,6 +96,26 @@ endif()
 # signing is enough to get the permission prompts. Each ad-hoc build is a new
 # identity for macOS, which may ask again after a rebuild: set
 # ROADIE_CODESIGN_IDENTITY to an "Apple Development" certificate to avoid it.
+# yt-dlp (universal standalone binary) is embedded in the bundle so the
+# YouTube import needs nothing installed. Fetched once at configure time.
+if(APPLE)
+    set(ROADIE_YTDLP "${CMAKE_CURRENT_SOURCE_DIR}/libs/yt-dlp/yt-dlp")
+    if(NOT EXISTS "${ROADIE_YTDLP}")
+        message(STATUS "Downloading yt-dlp…")
+        file(DOWNLOAD "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos" "${ROADIE_YTDLP}" STATUS ytdlp_status)
+        list(GET ytdlp_status 0 ytdlp_code)
+        if(NOT ytdlp_code EQUAL 0)
+            file(REMOVE "${ROADIE_YTDLP}")
+            message(FATAL_ERROR "Could not download yt-dlp: ${ytdlp_status}")
+        endif()
+        file(CHMOD "${ROADIE_YTDLP}" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+    endif()
+    add_custom_command(TARGET Roadie POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_CONTENT_DIR:Roadie>/Resources"
+        COMMAND ${CMAKE_COMMAND} -E copy "${ROADIE_YTDLP}" "$<TARGET_BUNDLE_CONTENT_DIR:Roadie>/Resources/yt-dlp"
+        VERBATIM)
+endif()
+
 if(APPLE)
     set(ROADIE_CODESIGN_IDENTITY "-" CACHE STRING "codesign identity for Roadie.app (- = ad-hoc)")
     add_custom_command(TARGET Roadie POST_BUILD
