@@ -25,7 +25,6 @@ public:
     // Count-in: clicks until the transport reaches `sample`, even with the
     // metronome off (−1: none).
     void setCountInEnd (std::int64_t sample) noexcept { countInEnd.store (sample, std::memory_order_relaxed); }
-    std::int64_t getCountInEnd() const noexcept { return countInEnd.load (std::memory_order_relaxed); }
 
     double getSamplesPerBeat() const noexcept;
 

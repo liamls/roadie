@@ -15,7 +15,6 @@ public:
     void setEnabled (bool shouldBeEnabled) noexcept { enabled.store (shouldBeEnabled, std::memory_order_relaxed); }
     bool isEnabled() const noexcept { return enabled.load (std::memory_order_relaxed); }
     void setThresholdDb (float db) noexcept { thresholdDb.store (db, std::memory_order_relaxed); }
-    float getThresholdDb() const noexcept { return thresholdDb.load (std::memory_order_relaxed); }
 
     // Audio thread. Processes in place.
     void process (float* samples, int numSamples) noexcept;

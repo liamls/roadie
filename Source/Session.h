@@ -205,7 +205,6 @@ public:
     // have no dry file and can't.
     bool canReampTake (int takeIndex) const;
     void reampTake (int takeIndex);
-    bool isReamping() const noexcept { return reamping; }
 
     void importSong (const juce::File& audioFile);
     // The backing track from a YouTube link: downloads the audio with yt-dlp

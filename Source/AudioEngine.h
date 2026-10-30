@@ -66,7 +66,6 @@ public:
     std::int64_t getTransportPosition() const noexcept { return transportPos.load (std::memory_order_relaxed); }
     bool isTransportRunning() const noexcept { return transportRunning.load (std::memory_order_relaxed); }
     double getSampleRate() const noexcept { return sampleRate.load (std::memory_order_relaxed); }
-    int getBlockSize() const noexcept { return blockSize.load (std::memory_order_relaxed); }
 
     // Cycle zone: the playhead jumps back to `start` when it reaches `end`
     // (unless a take is being recorded).
@@ -118,7 +117,6 @@ public:
     void setLoopGain (float linear) noexcept { loopGain.store (linear, std::memory_order_relaxed); }
 
     float getInputPeak() const noexcept { return inputPeak.load (std::memory_order_relaxed); }
-    float getOutputPeak() const noexcept { return outputPeak.load (std::memory_order_relaxed); }
     float getGuitarPeak() const noexcept { return guitarPeak.load (std::memory_order_relaxed); }
     float getLoopPeak() const noexcept { return loopPeak.load (std::memory_order_relaxed); }
 
@@ -199,7 +197,6 @@ private:
     std::vector<char> coveredBuffer;
 
     std::atomic<double> sampleRate { 48000.0 };
-    std::atomic<int> blockSize { 64 };
     std::atomic<int> inputLatencySamples { 0 };
     std::atomic<double> roundTripMs { 0.0 };
     std::atomic<int> deviceRoundTrip { 0 }, latencyAdjustment { 0 }, recordLatency { 0 };
@@ -230,7 +227,7 @@ private:
     std::atomic<bool> guitarMuted { false }, loopMuted { false };
     std::atomic<float> guitarGain { 1.0f }, loopGain { 1.0f };
 
-    std::atomic<float> inputPeak { 0.0f }, outputPeak { 0.0f }, guitarPeak { 0.0f }, loopPeak { 0.0f };
+    std::atomic<float> inputPeak { 0.0f }, guitarPeak { 0.0f }, loopPeak { 0.0f };
     std::atomic<float> masterGain { 1.0f }, outputPeakLeft { 0.0f }, outputPeakRight { 0.0f };
 
     std::array<std::atomic<float>, historyCapacity> history {};

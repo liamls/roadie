@@ -27,7 +27,6 @@ public:
     // Request transitions from the message thread (UI button clicks).
     void requestRecord();   // Empty -> Recording; Recording -> Playing (fixes loop length)
     void requestOverdub();  // Playing/Stopped -> Overdubbing; Overdubbing -> Playing
-    void requestPlayStop(); // Playing/Overdubbing -> Stopped; Stopped -> Playing
     void requestStop();     // Playing/Overdubbing -> Stopped (no toggle)
     void requestRestart();  // playhead back to the start of the loop
     void requestUndo();     // reverts the last overdub pass, if any
@@ -92,7 +91,6 @@ private:
 
     std::atomic<bool> recordRequested { false };
     std::atomic<bool> overdubRequested { false };
-    std::atomic<bool> playStopRequested { false };
     std::atomic<bool> stopRequested { false };
     std::atomic<bool> restartRequested { false };
     std::atomic<bool> undoRequested { false };

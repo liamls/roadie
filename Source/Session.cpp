@@ -905,28 +905,27 @@ void Session::reampTake (int takeIndex)
     sendChangeMessage();
 
     // The amp exactly as it is now, rebuilt off to the side.
-    struct Settings
+    struct AmpSnapshot
     {
         juce::File capture, ir;
         std::array<float, 7> knobsCopy {};
         bool gateOn = false, bypassCapture = false, bypassEq = false, bypassCab = false;
-    } settings;
+    } snapshot;
     auto& liveAmp = engine.getAmp();
-    settings.capture = liveAmp.getModelFile();
-    settings.ir = liveAmp.isIrLoaded() ? liveAmp.getIrFile() : juce::File();
-    for (size_t i = 0; i < settings.knobsCopy.size() && i < knobs.size(); ++i)
-        settings.knobsCopy[i] = knobs[i];
-    settings.gateOn = liveAmp.getGate().isEnabled();
-    settings.bypassCapture = liveAmp.isBypassed (AmpEngine::Block::capture);
-    settings.bypassEq = liveAmp.isBypassed (AmpEngine::Block::eq);
-    settings.bypassCab = liveAmp.isBypassed (AmpEngine::Block::cab);
+    snapshot.capture = liveAmp.getModelFile();
+    snapshot.ir = liveAmp.isIrLoaded() ? liveAmp.getIrFile() : juce::File();
+    for (size_t i = 0; i < snapshot.knobsCopy.size() && i < knobs.size(); ++i)
+        snapshot.knobsCopy[i] = knobs[i];
+    snapshot.gateOn = liveAmp.getGate().isEnabled();
+    snapshot.bypassCapture = liveAmp.isBypassed (AmpEngine::Block::capture);
+    snapshot.bypassEq = liveAmp.isBypassed (AmpEngine::Block::eq);
+    snapshot.bypassCab = liveAmp.isBypassed (AmpEngine::Block::cab);
 
     const auto dryFile = project.takes[(size_t) takeIndex].dryFile;
     const auto target = project.takes[(size_t) takeIndex].audioFile;
-    const double sr = engine.getSampleRate();
 
     std::weak_ptr<bool> weak = alive;
-    loaderPool.addJob ([this, weak, takeIndex, settings, dryFile, target, sr]
+    loaderPool.addJob ([this, weak, takeIndex, snapshot, dryFile, target]
     {
         juce::String error;
         std::vector<float> samples;
@@ -940,23 +939,23 @@ void Session::reampTake (int takeIndex)
             AmpEngine amp;
             constexpr int block = 512;
             amp.prepare (rate, block);
-            ok = amp.loadModel (settings.capture, error);
+            ok = amp.loadModel (snapshot.capture, error);
             if (ok)
             {
-                amp.setInputGainDb (settings.knobsCopy[(size_t) Knob::gain]);
-                amp.setOutputVolumeDb (settings.knobsCopy[(size_t) Knob::volume]);
-                amp.getToneStack().setGainDb (ToneStack::bass, settings.knobsCopy[(size_t) Knob::bass]);
-                amp.getToneStack().setGainDb (ToneStack::mid, settings.knobsCopy[(size_t) Knob::mid]);
-                amp.getToneStack().setGainDb (ToneStack::treble, settings.knobsCopy[(size_t) Knob::treble]);
-                amp.getToneStack().setGainDb (ToneStack::presence, settings.knobsCopy[(size_t) Knob::presence]);
-                amp.getGate().setEnabled (settings.gateOn);
-                amp.getGate().setThresholdDb (settings.knobsCopy[(size_t) Knob::gate]);
-                amp.setBypassed (AmpEngine::Block::capture, settings.bypassCapture);
-                amp.setBypassed (AmpEngine::Block::eq, settings.bypassEq);
-                amp.setBypassed (AmpEngine::Block::cab, settings.bypassCab);
-                if (settings.ir != juce::File())
+                amp.setInputGainDb (snapshot.knobsCopy[(size_t) Knob::gain]);
+                amp.setOutputVolumeDb (snapshot.knobsCopy[(size_t) Knob::volume]);
+                amp.getToneStack().setGainDb (ToneStack::bass, snapshot.knobsCopy[(size_t) Knob::bass]);
+                amp.getToneStack().setGainDb (ToneStack::mid, snapshot.knobsCopy[(size_t) Knob::mid]);
+                amp.getToneStack().setGainDb (ToneStack::treble, snapshot.knobsCopy[(size_t) Knob::treble]);
+                amp.getToneStack().setGainDb (ToneStack::presence, snapshot.knobsCopy[(size_t) Knob::presence]);
+                amp.getGate().setEnabled (snapshot.gateOn);
+                amp.getGate().setThresholdDb (snapshot.knobsCopy[(size_t) Knob::gate]);
+                amp.setBypassed (AmpEngine::Block::capture, snapshot.bypassCapture);
+                amp.setBypassed (AmpEngine::Block::eq, snapshot.bypassEq);
+                amp.setBypassed (AmpEngine::Block::cab, snapshot.bypassCab);
+                if (snapshot.ir != juce::File())
                 {
-                    amp.loadImpulseResponse (settings.ir);
+                    amp.loadImpulseResponse (snapshot.ir);
                     // The convolution swaps its response in from process(): feed it silence until it has.
                     std::vector<float> silence (block, 0.0f);
                     for (int i = 0; i < 500 && ! amp.isIrReady(); ++i)

@@ -59,7 +59,6 @@ public:
 
     // The panel it sizes is folded away: a grip stays visible to pull it back.
     void setCollapsed (bool shouldShowGrip);
-    bool isCollapsed() const noexcept { return collapsed; }
 
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
@@ -132,7 +131,6 @@ public:
     explicit SegmentedControl (std::vector<Segment> segments);
 
     void setSelected (int index);
-    int getSelected() const noexcept { return selected; }
     std::function<void (int)> onChange;
 
     int getIdealWidth() const;
@@ -222,7 +220,6 @@ public:
     void setRange (juce::Range<float> range, float defaultValue);
     void setValue (float value);
     float getValue() const { return (float) slider.getValue(); }
-    void setUnit (const juce::String& unitSuffix) { unit = unitSuffix; }
     void setTooltip (const juce::String& tip) { slider.setTooltip (tip); }
 
     std::function<void (float)> onChange;
@@ -259,9 +256,7 @@ public:
     Meter() = default;
     explicit Meter (Orientation o) : orientation (o) {}
 
-    void setOrientation (Orientation o) { orientation = o; repaint(); }
     void setLevel (float linear);
-    bool isClipped() const noexcept { return clipped; }
     void resetClip();
 
     static float toProportion (float linear);

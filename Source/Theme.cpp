@@ -115,19 +115,6 @@ juce::Colour ink (juce::Colour accent)
     return accent;
 }
 
-juce::Colour accentFor (Module module)
-{
-    switch (module)
-    {
-        case Module::amp:       return ampAccent;
-        case Module::loop:      return loopAccent;
-        case Module::camera:    return camAccent;
-        case Module::song:      return songAccent;
-        case Module::exporting: return exportAccent;
-        case Module::guitar:
-        default:                return textMuted;
-    }
-}
 } // namespace roadie::theme
 
 namespace roadie::fonts

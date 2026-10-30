@@ -27,7 +27,6 @@ void Looper::prepare (double newSampleRate, double maxLoopSeconds)
 
 void Looper::requestRecord() { recordRequested.store (true, std::memory_order_relaxed); }
 void Looper::requestOverdub() { overdubRequested.store (true, std::memory_order_relaxed); }
-void Looper::requestPlayStop() { playStopRequested.store (true, std::memory_order_relaxed); }
 void Looper::requestStop() { stopRequested.store (true, std::memory_order_relaxed); }
 void Looper::requestRestart() { restartRequested.store (true, std::memory_order_relaxed); }
 void Looper::requestUndo() { undoRequested.store (true, std::memory_order_relaxed); }
@@ -145,15 +144,6 @@ void Looper::applyPendingRequests()
         const auto current = state.load (std::memory_order_relaxed);
         if (current == State::Playing || current == State::Overdubbing)
             state.store (State::Stopped, std::memory_order_relaxed);
-    }
-
-    if (playStopRequested.exchange (false, std::memory_order_relaxed))
-    {
-        const auto current = state.load (std::memory_order_relaxed);
-        if (current == State::Playing || current == State::Overdubbing)
-            state.store (State::Stopped, std::memory_order_relaxed);
-        else if (current == State::Stopped && recordedLength.load (std::memory_order_relaxed) > 0)
-            state.store (State::Playing, std::memory_order_relaxed);
     }
 }
 

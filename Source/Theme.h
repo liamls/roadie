@@ -64,19 +64,6 @@ void drawSquircle (juce::Graphics& g, juce::Rectangle<float> area, float radius,
 constexpr float radiusSm = 8.0f;
 constexpr float radiusMd = 12.0f;
 constexpr float radiusLg = 16.0f;
-
-// Fixed colour per module — never a free palette per track.
-enum class Module
-{
-    guitar,
-    amp,
-    loop,
-    camera,
-    song,
-    exporting
-};
-
-juce::Colour accentFor (Module module);
 } // namespace roadie::theme
 
 // Typography. Target direction is Plus Jakarta Sans / Poppins (see the design

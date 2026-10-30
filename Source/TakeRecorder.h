@@ -19,7 +19,6 @@ public:
     void stop();
 
     bool isRecording() const noexcept { return active.load (std::memory_order_acquire); }
-    juce::File getCurrentFile() const { return currentFile; }
 
     double getRecordedSeconds() const noexcept;
 

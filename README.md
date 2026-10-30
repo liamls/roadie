@@ -8,7 +8,7 @@ Nom provisoire. Ce document existe pour que n'importe quelle machine (ou n'impor
 
 ---
 
-## 1. État du projet (29/10/2026)
+## 1. État du projet (30/10/2026)
 
 | Jalon | Statut |
 |---|---|
@@ -118,6 +118,17 @@ Caméra ─► CameraCapture (AVFoundation) ─► aperçu + prise .mov (H.264),
 Ajouts de la refonte : **`SongAnalysis`** (tempo par autocorrélation d'une enveloppe d'attaques sur trois bandes puis ajustement d'une grille sur tout le morceau, premier temps par la grosse caisse, parties par nouveauté mesure à mesure), **`TimeStretch`** (WSOLA hors ligne sur les deux canaux à la fois, puis rééchantillonnage pour transposer), **`NoiseGate`** (avant la capture, hystérésis de 6 dB), **`Tuner`** (YIN) — tous sans JUCE. `AudioEngine` mixe en **stéréo** (guitare, boucle et clic au centre, le morceau avec sa stéréo, puis le Master) et place prises, boucles et overdubs une latence aller-retour plus tôt (celle annoncée par l'interface, plus la correction des Réglages audio). Le changement de capture NAM passe par un pointeur rendu au fil principal : plus de bloc sans ampli.
 
 **Interface** (`Source/UI/`) — deux espaces dans une fenêtre, choisis par le sélecteur **Jouer | Monter** en haut à gauche (⌘1 / ⌘2) : `TopBar` (sélecteur, transport, écran mesure/tempo/signature, métronome, accordeur, nom du projet et son état, une pastille latence · CPU qui ouvre les réglages audio, Exporter), `LibraryPanel` (onglets Captures / Morceaux / Prises + recherche), `Monitor` (moniteur intégré : direct avec guides 9:16 / 16:9 et décompte en surimpression en Jouer, lecture seule en Monter), `StagePanel` (Jouer : pédale Looper et balance Morceau / Guitare / Boucle), `Timeline` (bande vidéo en haut, Guitare, Looper, Morceau avec ses parties, Master ; hauteur de chaque piste réglable), `Inspector` (chaîne de signal de l'ampli, Looper, Caméra avec calibration en assistant, Morceau ; empilé et défilant dans la colonne étroite de Monter), `ExportSheet`, `Widgets` (dont `Fader` à courbe de console, `Meter` avec crête et témoin de saturation, `SegmentedControl`, `Splitter` repliable) et `Icons`. `MainComponent` place les panneaux de l'espace courant (tailles par espace, repli, panneau agrandi, transition de 200 ms), coupe la caméra en Monter et route raccourcis, menus et glisser-déposer.
+
+### Organisation du dépôt
+
+| Chemin | Contenu |
+|---|---|
+| `Source/` | Moteur (sans UI), session, formats ; `Source/UI/` pour les panneaux ; `*_mac.mm` pour AVFoundation, `Platform_stub.cpp` pour les autres systèmes |
+| `Tests/` | Tests du looper, du DSP et du moteur ; `TestMovie_mac.mm` fabrique une vidéo synthétique |
+| `Tools/` | `nam_bench.cpp`, mesure de charge CPU d'une capture |
+| `docs/` | `design-direction.md` (direction visuelle), `reference-ui-garageband-filmcraft.md` (étude d'ergonomie GarageBand / filmcraft), `screenshot.png` |
+| `site/` | `index.html`, page de présentation autonome (aucune dépendance au build) |
+| `libs/` | Sous-modules JUCE et NeuralAmpModelerCore |
 
 ### Sous-modules
 

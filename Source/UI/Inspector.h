@@ -14,7 +14,6 @@ public:
     void show (Session::Track track);
     std::function<void()> onImportSong; // "Choisir un morceau…"
     std::function<void()> onImportYouTube; // "Depuis YouTube…"
-    Session::Track getShown() const noexcept { return shown; }
 
     // Called by the main window's UI timer.
     void refresh();

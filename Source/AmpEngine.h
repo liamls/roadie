@@ -49,7 +49,6 @@ public:
     bool isBypassed (Block block) const noexcept { return bypass[(size_t) block].load (std::memory_order_relaxed); }
 
     // Peak of the last processed block, linear 0..~1+. Safe to poll from the message thread.
-    float getPeakLevel() const noexcept { return peakLevel.load (std::memory_order_relaxed); }
 
     // Audio-thread only. Processes numSamples in place; runs the dry signal
     // through input/output trim even if no model is loaded or a swap is in
@@ -86,7 +85,6 @@ private:
 
     std::atomic<float> inputGain { 1.0f };
     std::atomic<float> outputVolume { 1.0f };
-    std::atomic<float> peakLevel { 0.0f };
 
     double currentSampleRate = 44100.0;
     // Read on the audio thread (process() chunks to this size), written when

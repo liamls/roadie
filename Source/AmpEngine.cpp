@@ -121,13 +121,8 @@ void AmpEngine::process (float* samples, int numSamples)
     if (ampActive)
         outVolume *= loudnessCompensation.load (std::memory_order_relaxed);
 
-    float peak = 0.0f;
     for (int i = 0; i < numSamples; ++i)
-    {
         samples[i] *= outVolume;
-        peak = std::max (peak, std::abs (samples[i]));
-    }
-    peakLevel.store (peak, std::memory_order_relaxed);
 }
 
 void AmpEngine::loadImpulseResponse (const juce::File& newIrFile)

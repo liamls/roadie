@@ -191,7 +191,6 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     const int bs = device->getCurrentBufferSizeSamples();
 
     sampleRate.store (sr, std::memory_order_relaxed);
-    blockSize.store (bs, std::memory_order_relaxed);
     inputLatencySamples.store (device->getInputLatencyInSamples(), std::memory_order_relaxed);
 
     amp.prepare (sr, bs);
@@ -586,7 +585,6 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     }
 
     inputPeak.store (blockInputPeak, std::memory_order_relaxed);
-    outputPeak.store (blockOutputPeak, std::memory_order_relaxed);
     guitarPeak.store (blockGuitarPeak, std::memory_order_relaxed);
     loopPeak.store (blockLoopPeak, std::memory_order_relaxed);
     songPeak.store (blockSongPeak, std::memory_order_relaxed);

@@ -25,7 +25,6 @@ public:
 
     // Height of the Balance part, dragged by the divider above it.
     void setBalanceHeight (int height);
-    int getBalanceHeight() const noexcept { return balanceHeight; }
     std::function<void (int)> onBalanceHeightChanged;
     static constexpr int defaultBalanceHeight = 250, minBalanceHeight = 150;
 

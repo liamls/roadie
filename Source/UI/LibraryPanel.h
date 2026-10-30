@@ -17,7 +17,6 @@ public:
 
     enum class Tab { captures, songs, takes };
     void setTab (Tab tab);
-    Tab getTab() const noexcept { return tab; }
 
     std::function<void()> onImportSong; // "Importer un morceau…"
     std::function<void()> onImportYouTube; // "Depuis YouTube…"
